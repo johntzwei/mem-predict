@@ -18,13 +18,14 @@ There is a simple but costly way to compute a sequence's extractability, which i
 
 Methods will be plotted on a pareto curve trading off accuracy and compute costs. The goal is to achieve high accuracy and efficient prediction.
 
-# Hubble model suite
+# Background
+## Hubble model suite
 
 The Hubble model suite consists of 1B & 8B parameter models trained on 100B & 500B tokens from DCLM corpus. Canary insertions include passages, paraphrases, biographies, chats, and test sets duplicated at 0/1/4/16/64/256 times (<0.01% of training tokens). The models and datasets can be found [here](https://huggingface.co/allegrolab).
 
 Typically, we can use the 1B/100B perturbed model (huggingface identifier: `allegrolab/hubble-1b-100b_toks-perturbed-hf`) to run initial experiments. It is also easiest to work with the randomly inserted Wikpedia passages(huggingface identifier: `allegrolab/passages_wikipedia`) first.
 
-# Technical notes
+## Technical notes
 
 - Model memorization is thought to occur in earlier layers and be refined by the subsequent layers, in a low rank subspace (see https://arxiv.org/abs/2012.14913 and https://rome.baulab.info/)
 - Low-curvature directions correspond to memorization, high-curvature to generalization (see https://arxiv.org/html/2510.24256v2)
