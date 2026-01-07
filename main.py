@@ -53,33 +53,36 @@ class Evaluator:
 
 
 class SimpleForward(Predictor):
+    def __init__(self, hf_model, device, k: int = 30, n: int = 20):
+        super().__init__(hf_model, device)
+        self.k = k  # prefix length
+        self.n = n  # tokens to predict
+
     def predict(self, example: Dict) -> PredictionResult:
-        input_ids = example['input_ids'].to(self.device)
-        input_ids = input_ids[:50].unsqueeze(0)
+        input_ids = example['input_ids'][:self.k + self.n].unsqueeze(0).to(self.device)
 
         self.hf_model.eval()
         with torch.no_grad():
-            outputs = self.hf_model.forward(input_ids=input_ids)
-            logits = outputs.logits
+            logits = self.hf_model.forward(input_ids=input_ids).logits
 
-        outputs = torch.argmax(logits, dim=-1)
-        outputs = outputs.squeeze(0).cpu()
+        # logits[i] predicts token i+1; we want predictions for positions k to k+n-1
+        predicted = torch.argmax(logits, dim=-1).squeeze(0)[self.k - 1 : self.k + self.n - 1]
+        target = example['input_ids'][self.k : self.k + self.n].to(self.device)
 
-        prediction = (outputs == example['input_ids'][31:51]).to(
-            torch.float32).mean().item()
-        # for SimpleForward, this is the most compute intensive and ground truth
-        ground_truth = all(outputs == example['input_ids'][31:51])
+        matches = (predicted == target)
+        prediction = matches.float().mean().item()
+        ground_truth = matches.all().item()
 
         return PredictionResult(
-            tokens_generated=20,
-            total_tokens=50,
+            tokens_generated=self.n,
+            total_tokens=self.k + self.n,
             prediction=prediction,
             ground_truth=ground_truth
         )
 
     @property
     def name(self) -> str:
-        return f'SimpleForward'
+        return f'SimpleForward(k={self.k}, n={self.n})'
 
 
 def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: str) -> Dataset:
@@ -92,24 +95,25 @@ def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: st
 
 
 # %%
-device = 'cuda'
-model_str = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
-model = AutoModelForCausalLM.from_pretrained(model_str)
-tokenizer = AutoTokenizer.from_pretrained(model_str)
+if __name__ == "__main__":
+    device = 'cuda'
+    model_str = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
+    model = AutoModelForCausalLM.from_pretrained(model_str)
+    tokenizer = AutoTokenizer.from_pretrained(model_str)
 
-ds: DatasetDict = load_dataset('allegrolab/passages_wikipedia')
-tokenized_ds = process_data(ds, tokenizer, split='train')
+    ds: DatasetDict = load_dataset('allegrolab/passages_wikipedia')
+    tokenized_ds = process_data(ds, tokenizer, split='train')
 
-predictor = SimpleForward(hf_model=model, device=device)
-r = predictor.predict(tokenized_ds[-100])
+    predictor = SimpleForward(hf_model=model, device=device)
+    r = predictor.predict(tokenized_ds[-100])
 
-print(tokenized_ds[-1]['text'])
-print(r)
+    print(tokenized_ds[-1]['text'])
+    print(r)
 
-results = [r]
-evaluator = Evaluator()
-evaluator.add_results(predictor.name, results)
-evaluator.summary()
-evaluator.plot_pareto()
+    results = [r]
+    evaluator = Evaluator()
+    evaluator.add_results(predictor.name, results)
+    evaluator.summary()
+    evaluator.plot_pareto()
 
 # %%
