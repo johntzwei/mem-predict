@@ -1,8 +1,8 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import DefaultDict, Dict, List, Optional
-from dataclasses import dataclass, asdict
-import json
+from collections import defaultdict
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 
 import torch
 from datasets import load_dataset
@@ -42,7 +42,7 @@ class PredictionResult:
 
 class Evaluator:
     def __init__(self):
-        self.predictions: Dict[str, List[PredictionResult]] = DefaultDict(list)
+        self.predictions: Dict[str, List[PredictionResult]] = defaultdict(list)
 
     def add_results(self, method: str, results: List[PredictionResult]):
         self.predictions[method] = results
