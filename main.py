@@ -114,22 +114,38 @@ def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: st
 
 
 if __name__ == "__main__":
+    from tqdm import tqdm
+
     device = 'cuda'
     model_str = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
+    output_path = "results/simple_forward_predictions.json"
+
+    print(f"Loading model: {model_str}")
     model = AutoModelForCausalLM.from_pretrained(model_str)
     tokenizer = AutoTokenizer.from_pretrained(model_str)
 
+    print("Loading and tokenizing dataset...")
     ds: DatasetDict = load_dataset('allegrolab/passages_wikipedia')
     tokenized_ds = process_data(ds, tokenizer, split='train')
+    print(f"Dataset size: {len(tokenized_ds)} examples")
 
     predictor = SimpleForward(hf_model=model, device=device)
-    r = predictor.predict(tokenized_ds[-100])
+    print(f"Running predictions with {predictor.name}...")
+    results = []
+    for example in tqdm(tokenized_ds):
+        results.append(predictor.predict(example))
 
-    print(tokenized_ds[-1]['text'])
-    print(r)
-
-    results = [r]
     evaluator = Evaluator()
     evaluator.add_results(predictor.name, results)
-    evaluator.summary()
-    evaluator.plot_pareto()
+
+    import os
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    evaluator.save_results(output_path)
+    print(f"Saved {len(results)} predictions to {output_path}")
+
+    # Print quick summary
+    extractable = sum(1 for r in results if r.ground_truth)
+    avg_prediction = sum(r.prediction for r in results) / len(results)
+    print(
+        f"Extractable sequences: {extractable}/{len(results)} ({100*extractable/len(results):.2f}%)")
+    print(f"Average token match rate: {avg_prediction:.4f}")
