@@ -118,7 +118,7 @@ if __name__ == "__main__":
 
     device = 'cuda'
     model_str = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
-    output_path = "results/simple_forward_predictions.json"
+    output_path = "results/wikipedia_passages/simple_forward_predictions.json"
 
     print(f"Loading model: {model_str}")
     model = AutoModelForCausalLM.from_pretrained(model_str)
