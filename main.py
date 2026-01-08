@@ -8,7 +8,10 @@ from typing import Dict, List, Optional
 from dataclasses import asdict, dataclass
 
 import torch
+import pandas as pd
+import matplotlib.pyplot as plt
 from tqdm import tqdm
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
@@ -25,7 +28,7 @@ class Predictor(ABC):
     def predict(self, example) -> PredictionResult:
         pass
 
-    def predict_batch(self, ds: Dataset) -> List[PredictionResult]:
+    def predict_batch(self, ds) -> List[PredictionResult]:
         return [self.predict(example) for example in ds]
 
     @property
@@ -65,11 +68,51 @@ class Evaluator:
                 [PredictionResult(**r) for r in data]
             )
 
-    def summary(self):
-        pass
+    def summary(self) -> pd.DataFrame:
+        rows = []
+        for method, preds in self.predictions.items():
+            y_true = [int(p.ground_truth) for p in preds]
+            y_score = [p.prediction for p in preds]
+            y_pred = [int(p.prediction >= 0.5) for p in preds]
 
-    def plot_pareto(self):
-        pass
+            rows.append({
+                'method': method,
+                'accuracy': accuracy_score(y_true, y_pred),
+                'precision': precision_score(y_true, y_pred, zero_division=0),
+                'recall': recall_score(y_true, y_pred, zero_division=0),
+                'f1': f1_score(y_true, y_pred, zero_division=0),
+                'auroc': roc_auc_score(y_true, y_score) if len(set(y_true)) > 1 else float('nan'),
+            })
+
+        df = pd.DataFrame(rows).set_index('method')
+        print(df.to_string())
+        return df
+
+    def plot_pareto(self, metric: str = 'auroc', save_path: Optional[str] = None):
+        df = self.summary()
+
+        # Get tokens processed for each method
+        max_tokens = max(preds[0].total_tokens for preds in self.predictions.values())
+        df['tokens_pct'] = [self.predictions[m][0].total_tokens / max_tokens * 100 for m in df.index]
+        df = df.sort_values('tokens_pct')
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(df['tokens_pct'], df[metric], 'o-', markersize=8)
+
+        for _, row in df.iterrows():
+            ax.annotate(row.name, (row['tokens_pct'], row[metric]),
+                        textcoords="offset points", xytext=(5, 5), fontsize=8)
+
+        ax.set_xlabel('Tokens Processed (%)')
+        ax.set_ylabel(metric.upper())
+        ax.set_title(f'Pareto Curve: Compute vs {metric.upper()}')
+        ax.set_xlim(0, 105)
+        ax.grid(True, alpha=0.3)
+
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.show()
+        return fig
 
 
 class SimpleForward(Predictor):
@@ -122,11 +165,10 @@ class SimpleEarlyExit(Predictor):
         self.cache: List[PredictionResult] = [
             PredictionResult(**r) for r in data]
 
-    def predict(self, example) -> PredictionResult:
-        raise NotImplementedError
-
     def _predict(self, index: int) -> PredictionResult:
         cached: PredictionResult = self.cache[index]
+        assert (cached.predicted_tokens and cached.target_tokens)
+
         predicted = cached.predicted_tokens[:self.x]
         target = cached.target_tokens[:self.x]
 
@@ -144,11 +186,14 @@ class SimpleEarlyExit(Predictor):
 
     def predict_batch(self, ds: Dataset) -> List[PredictionResult]:
         assert (len(ds) == len(self.cache))
-        return [self.predict(i) for i in range(len(self.cache))]
+        return [self._predict(i) for i in range(len(self.cache))]
 
     @property
     def name(self) -> str:
         return f'SimpleEarlyExit_k{self.k}_n{self.n}_x{self.x}'
+
+    def predict(self, example) -> PredictionResult:
+        raise NotImplementedError
 
 
 def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: str) -> Dataset:
