@@ -3,7 +3,7 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from main import SimpleForward, SimpleEarlyExit, PredictionResult, process_data
+from main import SimpleForward, SimpleEarlyExit, PredictionResult, Evaluator, process_data
 
 MODEL_STR = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
 DEVICE = "cuda"
@@ -102,3 +102,29 @@ def test_simple_early_exit_equals_simple_forward_at_x_equals_n(model, tokenized_
     assert see_result.ground_truth == sf_result.ground_truth
     assert see_result.predicted_tokens == sf_result.predicted_tokens
     assert see_result.target_tokens == sf_result.target_tokens
+
+
+def test_evaluator_summary():
+    """Test Evaluator.summary with hardcoded predictions and expected metrics."""
+    evaluator = Evaluator()
+
+    # 4 predictions: 1 TP, 1 FN, 1 FP, 1 TN
+    results = [
+        PredictionResult(tokens_generated=20, total_tokens=50,
+                         prediction=0.9, ground_truth=True),   # TP
+        PredictionResult(tokens_generated=20, total_tokens=50,
+                         prediction=0.4, ground_truth=True),   # FN
+        PredictionResult(tokens_generated=20, total_tokens=50,
+                         prediction=0.6, ground_truth=False),  # FP
+        PredictionResult(tokens_generated=20, total_tokens=50,
+                         prediction=0.2, ground_truth=False),  # TN
+    ]
+    evaluator.add_results('test_method', results)
+
+    df = evaluator.summary()
+
+    assert df.loc['test_method', 'accuracy'] == 0.5
+    assert df.loc['test_method', 'precision'] == 0.5
+    assert df.loc['test_method', 'recall'] == 0.5
+    assert df.loc['test_method', 'f1'] == 0.5
+    assert df.loc['test_method', 'auroc'] == 0.75
