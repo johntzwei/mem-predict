@@ -3,7 +3,7 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from main import SimpleForward, PredictionResult, process_data
+from main import SimpleForward, SimpleEarlyExit, PredictionResult, process_data
 
 MODEL_STR = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
 DEVICE = "cuda"
@@ -71,3 +71,34 @@ def test_simple_forward_mocked(mock_model):
     assert result.predicted_tokens == [2, 3]
     assert result.target_tokens == [2, 3]
     assert result.ground_truth == True
+
+
+def test_simple_early_exit_equals_simple_forward_at_x_equals_n(model, tokenized_ds):
+    """When x=n, SimpleEarlyExit should match SimpleForward on the same example."""
+    import tempfile
+    import json
+    import os
+    from dataclasses import asdict
+
+    k, n = 30, 20
+
+    # Run SimpleForward on last example
+    sf = SimpleForward(hf_model=model, device=DEVICE, k=k, n=n)
+    sf_result = sf.predict(tokenized_ds[-1])
+
+    # Save to temp file for SimpleEarlyExit to load
+    data = {sf.name: [asdict(sf_result)]}
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json.dump(data, f)
+        temp_path = f.name
+
+    # Run SimpleEarlyExit with x=n
+    see = SimpleEarlyExit(cache_path=temp_path, k=k, n=n, x=n)
+    see_result = see.predict(0)
+
+    os.unlink(temp_path)
+
+    assert see_result.prediction == sf_result.prediction
+    assert see_result.ground_truth == sf_result.ground_truth
+    assert see_result.predicted_tokens == sf_result.predicted_tokens
+    assert see_result.target_tokens == sf_result.target_tokens
