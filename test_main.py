@@ -86,15 +86,15 @@ def test_simple_early_exit_equals_simple_forward_at_x_equals_n(model, tokenized_
     sf = SimpleForward(hf_model=model, device=DEVICE, k=k, n=n)
     sf_result = sf.predict(tokenized_ds[-1])
 
-    # Save to temp file for SimpleEarlyExit to load
-    data = {sf.name: [asdict(sf_result)]}
+    # Save to temp file for SimpleEarlyExit to load (list format matches Evaluator.save_results)
+    data = [asdict(sf_result)]
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         json.dump(data, f)
         temp_path = f.name
 
     # Run SimpleEarlyExit with x=n
     see = SimpleEarlyExit(cache_path=temp_path, k=k, n=n, x=n)
-    see_result = see.predict(0)
+    see_result = see._predict(0)
 
     os.unlink(temp_path)
 
