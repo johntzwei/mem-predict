@@ -8,8 +8,18 @@ from typing import Dict, List, Optional
 from dataclasses import asdict, dataclass
 
 import torch
+import numpy as np
 from tqdm import tqdm
 from datasets import load_dataset
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    average_precision_score,
+    brier_score_loss,
+)
 from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
@@ -65,8 +75,52 @@ class Evaluator:
                 [PredictionResult(**r) for r in data]
             )
 
-    def summary(self):
-        pass
+    def compute_metrics(self, method: str, threshold: float = 0.5) -> Dict[str, float]:
+        """Compute sklearn metrics for a single method.
+
+        Args:
+            method: Name of the prediction method
+            threshold: Threshold for converting prediction scores to binary labels
+
+        Returns:
+            Dictionary of metric names to values
+        """
+        results = self.predictions[method]
+
+        # Extract predictions and ground truth
+        y_score = np.array([r.prediction for r in results])
+        y_true = np.array([r.ground_truth for r in results], dtype=int)
+        y_pred = (y_score >= threshold).astype(int)
+
+        metrics = {}
+
+        # Classification metrics at threshold
+        metrics['accuracy'] = accuracy_score(y_true, y_pred)
+        metrics['precision'] = precision_score(y_true, y_pred, zero_division=0)
+        metrics['recall'] = recall_score(y_true, y_pred, zero_division=0)
+        metrics['f1'] = f1_score(y_true, y_pred, zero_division=0)
+
+        # Probability-based metrics (threshold-independent)
+        # These require both classes to be present
+        if len(np.unique(y_true)) > 1:
+            metrics['roc_auc'] = roc_auc_score(y_true, y_score)
+            metrics['average_precision'] = average_precision_score(y_true, y_score)
+        else:
+            metrics['roc_auc'] = float('nan')
+            metrics['average_precision'] = float('nan')
+
+        # Calibration metric
+        metrics['brier_score'] = brier_score_loss(y_true, y_score)
+
+        return metrics
+
+    def summary(self) -> Dict[str, Dict[str, float]]:
+        """Compute metrics summary for all methods.
+
+        Returns:
+            Dictionary mapping method names to their metrics
+        """
+        return {method: self.compute_metrics(method) for method in self.predictions}
 
     def plot_pareto(self):
         pass
