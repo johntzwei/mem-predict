@@ -8,11 +8,20 @@ from typing import Dict, List, Optional
 from dataclasses import asdict, dataclass
 
 import torch
+import numpy as np
 from tqdm import tqdm
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    roc_auc_score,
+    average_precision_score,
+    confusion_matrix,
+    classification_report
+)
 
 
 class Predictor(ABC):
@@ -65,8 +74,103 @@ class Evaluator:
                 [PredictionResult(**r) for r in data]
             )
 
-    def summary(self):
-        pass
+    def compute_metrics(self, method: str) -> Dict:
+        """Compute comprehensive sklearn metrics for a method's predictions."""
+        results = self.predictions[method]
+
+        # Extract predictions and ground truth
+        y_pred_proba = np.array([r.prediction for r in results])
+        y_true = np.array([r.ground_truth for r in results if r.ground_truth is not None])
+        y_pred_proba_filtered = np.array([r.prediction for r in results if r.ground_truth is not None])
+
+        # Binary predictions using 0.5 threshold
+        y_pred_binary = (y_pred_proba_filtered >= 0.5).astype(int)
+
+        metrics = {
+            'method': method,
+            'num_samples': len(results),
+            'num_with_ground_truth': len(y_true),
+        }
+
+        if len(y_true) > 0:
+            # Basic classification metrics
+            metrics['accuracy'] = accuracy_score(y_true, y_pred_binary)
+
+            # Precision, Recall, F1
+            precision, recall, f1, support = precision_recall_fscore_support(
+                y_true, y_pred_binary, average='binary', zero_division=0
+            )
+            metrics['precision'] = precision
+            metrics['recall'] = recall
+            metrics['f1_score'] = f1
+
+            # Confusion matrix
+            tn, fp, fn, tp = confusion_matrix(y_true, y_pred_binary).ravel()
+            metrics['true_positives'] = int(tp)
+            metrics['true_negatives'] = int(tn)
+            metrics['false_positives'] = int(fp)
+            metrics['false_negatives'] = int(fn)
+
+            # ROC-AUC and PR-AUC (if we have both classes)
+            if len(np.unique(y_true)) > 1:
+                metrics['roc_auc'] = roc_auc_score(y_true, y_pred_proba_filtered)
+                metrics['pr_auc'] = average_precision_score(y_true, y_pred_proba_filtered)
+            else:
+                metrics['roc_auc'] = None
+                metrics['pr_auc'] = None
+
+            # Compute cost metrics
+            avg_tokens_generated = np.mean([r.tokens_generated for r in results])
+            avg_total_tokens = np.mean([r.total_tokens for r in results])
+            metrics['avg_tokens_generated'] = avg_tokens_generated
+            metrics['avg_total_tokens'] = avg_total_tokens
+            metrics['compute_ratio'] = avg_tokens_generated / avg_total_tokens if avg_total_tokens > 0 else 0
+
+        return metrics
+
+    def summary(self, methods: Optional[List[str]] = None):
+        """Print a summary of metrics for all or specified methods."""
+        if methods is None:
+            methods = list(self.predictions.keys())
+
+        print("\n" + "="*80)
+        print("EVALUATION SUMMARY")
+        print("="*80 + "\n")
+
+        for method in methods:
+            if method not in self.predictions:
+                print(f"Warning: No results found for method '{method}'")
+                continue
+
+            metrics = self.compute_metrics(method)
+
+            print(f"Method: {method}")
+            print("-" * 80)
+            print(f"  Samples: {metrics['num_samples']} (with ground truth: {metrics['num_with_ground_truth']})")
+
+            if metrics['num_with_ground_truth'] > 0:
+                print(f"\n  Classification Metrics:")
+                print(f"    Accuracy:  {metrics['accuracy']:.4f}")
+                print(f"    Precision: {metrics['precision']:.4f}")
+                print(f"    Recall:    {metrics['recall']:.4f}")
+                print(f"    F1-Score:  {metrics['f1_score']:.4f}")
+
+                if metrics['roc_auc'] is not None:
+                    print(f"    ROC-AUC:   {metrics['roc_auc']:.4f}")
+                    print(f"    PR-AUC:    {metrics['pr_auc']:.4f}")
+
+                print(f"\n  Confusion Matrix:")
+                print(f"    TP: {metrics['true_positives']:5d}  FP: {metrics['false_positives']:5d}")
+                print(f"    FN: {metrics['false_negatives']:5d}  TN: {metrics['true_negatives']:5d}")
+
+                print(f"\n  Compute Efficiency:")
+                print(f"    Avg tokens generated: {metrics['avg_tokens_generated']:.2f}")
+                print(f"    Avg total tokens:     {metrics['avg_total_tokens']:.2f}")
+                print(f"    Compute ratio:        {metrics['compute_ratio']:.4f}")
+
+            print("\n")
+
+        print("="*80 + "\n")
 
     def plot_pareto(self):
         pass
@@ -197,3 +301,6 @@ if __name__ == "__main__":
         cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
         predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
         results = load_cached(evaluator, results_dir, predictor)
+
+    # Display comprehensive metrics summary
+    evaluator.summary()
