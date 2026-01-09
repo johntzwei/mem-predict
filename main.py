@@ -4,31 +4,32 @@ import os
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import asdict, dataclass
 
 import torch
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 
 class Predictor(ABC):
-    def __init__(self, hf_model, device):
+    def __init__(self, hf_model: PreTrainedModel, device: str) -> None:
         self.hf_model = hf_model
         self.device: str = device
         hf_model.to(device)
 
     @abstractmethod
-    def predict(self, example) -> PredictionResult:
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
         pass
 
-    def predict_batch(self, ds) -> List[PredictionResult]:
+    def predict_batch(self, ds: Dataset) -> List[PredictionResult]:
         return [self.predict(example) for example in ds]
 
     @property
@@ -48,19 +49,19 @@ class PredictionResult:
 
 
 class Evaluator:
-    def __init__(self):
+    def __init__(self) -> None:
         self.predictions: Dict[str, List[PredictionResult]] = defaultdict(list)
 
-    def add_results(self, method: str, results: List[PredictionResult]):
+    def add_results(self, method: str, results: List[PredictionResult]) -> None:
         self.predictions[method] = results
 
-    def save_results(self, results_dir: str, method: str):
+    def save_results(self, results_dir: str, method: str) -> None:
         data = [asdict(r) for r in self.predictions[method]]
         os.makedirs(os.path.dirname(results_dir), exist_ok=True)
         with open(os.path.join(results_dir, f'{method}.json'), 'w') as f:
             json.dump(data, f, indent=2)
 
-    def load_results(self, results_dir: str, method: str):
+    def load_results(self, results_dir: str, method: str) -> None:
         with open(os.path.join(results_dir, f'{method}.json'), 'r') as f:
             data = json.load(f)
             self.add_results(
@@ -88,7 +89,7 @@ class Evaluator:
         print(df.to_string())
         return df
 
-    def plot_pareto(self, metric: str = 'auroc', save_path: Optional[str] = None):
+    def plot_pareto(self, metric: str = 'auroc', save_path: Optional[str] = None) -> Figure:
         df = self.summary()
 
         # Get tokens processed for each method
@@ -116,12 +117,12 @@ class Evaluator:
 
 
 class SimpleForward(Predictor):
-    def __init__(self, hf_model, device, k: int = 30, n: int = 20):
+    def __init__(self, hf_model: PreTrainedModel, device: str, k: int = 30, n: int = 20) -> None:
         super().__init__(hf_model, device)
         self.k = k  # prefix length
         self.n = n  # tokens to predict
 
-    def predict(self, example) -> PredictionResult:
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
         input_ids = example['input_ids'][:self.k +
                                          self.n].unsqueeze(0).to(self.device)
         assert (input_ids.shape[1] == self.k + self.n)
@@ -156,7 +157,7 @@ class SimpleForward(Predictor):
 class SimpleEarlyExit(Predictor):
     """Evaluates early exit predictions from cached SimpleForward results."""
 
-    def __init__(self, cache_path: str, k: int = 30, n: int = 20, x: int = 5):
+    def __init__(self, cache_path: str, k: int = 30, n: int = 20, x: int = 5) -> None:
         self.k = k
         self.n = n
         self.x = x
@@ -192,12 +193,12 @@ class SimpleEarlyExit(Predictor):
     def name(self) -> str:
         return f'SimpleEarlyExit_k{self.k}_n{self.n}_x{self.x}'
 
-    def predict(self, example) -> PredictionResult:
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
         raise NotImplementedError
 
 
 def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: str) -> Dataset:
-    def tokenize(example):
+    def tokenize(example: Dict[str, Any]) -> Dict[str, Any]:
         return tokenizer(example["text"], truncation=True, max_length=512)
 
     tokenized_ds: Dataset = dataset[split].map(tokenize, batched=True)
