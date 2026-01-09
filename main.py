@@ -22,7 +22,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, P
 class Predictor(ABC):
     def __init__(self, hf_model: PreTrainedModel, device: str) -> None:
         self.hf_model = hf_model
-        self.device: str = device
+        self.device = device
         hf_model.to(device)
 
     @abstractmethod
@@ -50,7 +50,7 @@ class PredictionResult:
 
 class Evaluator:
     def __init__(self) -> None:
-        self.predictions: Dict[str, List[PredictionResult]] = defaultdict(list)
+        self.predictions = defaultdict(list)
 
     def add_results(self, method: str, results: List[PredictionResult]) -> None:
         self.predictions[method] = results
@@ -163,11 +163,10 @@ class SimpleEarlyExit(Predictor):
         self.x = x
         with open(cache_path, 'r') as f:
             data = json.load(f)
-        self.cache: List[PredictionResult] = [
-            PredictionResult(**r) for r in data]
+        self.cache = [PredictionResult(**r) for r in data]
 
     def _predict(self, index: int) -> PredictionResult:
-        cached: PredictionResult = self.cache[index]
+        cached = self.cache[index]
         assert (cached.predicted_tokens and cached.target_tokens)
 
         predicted = cached.predicted_tokens[:self.x]
@@ -201,7 +200,7 @@ def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: st
     def tokenize(example: Dict[str, Any]) -> Dict[str, Any]:
         return tokenizer(example["text"], truncation=True, max_length=512)
 
-    tokenized_ds: Dataset = dataset[split].map(tokenize, batched=True)
+    tokenized_ds = dataset[split].map(tokenize, batched=True)
     tokenized_ds.set_format("torch")
     return tokenized_ds
 
