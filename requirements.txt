@@ -1,0 +1,9 @@
+datasets
+matplotlib
+pandas
+pytest
+pytest-mock
+scikit-learn
+torch==2.9.1
+transformers==4.55.4
+tqdm
