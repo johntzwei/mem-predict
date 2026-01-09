@@ -7,7 +7,7 @@ from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
-from main import SimpleForward, SimpleEarlyExit, PredictionResult, Evaluator, process_data
+from main import SimpleForward, SimpleEarlyExit, CrossModelPredictor, PredictionResult, Evaluator, process_data
 
 MODEL_STR = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
 DEVICE = "cuda"
@@ -132,3 +132,35 @@ def test_evaluator_summary() -> None:
     assert df.loc['test_method', 'recall'] == 0.5
     assert df.loc['test_method', 'f1'] == 0.5
     assert df.loc['test_method', 'auroc'] == 0.75
+
+
+def test_cross_model_equals_early_exit_same_cache(model: PreTrainedModel, tokenized_ds: Dataset) -> None:
+    """CrossModelPredictor with same source/target cache should match SimpleEarlyExit."""
+    import tempfile
+    import json
+    import os
+    from dataclasses import asdict
+
+    k, n, x = 30, 20, 10
+
+    # Run SimpleForward on a few examples to create cache
+    sf = SimpleForward(hf_model=model, device=DEVICE, k=k, n=n)
+    sf_results = [sf.predict(tokenized_ds[i]) for i in range(3)]
+
+    # Save cache
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json.dump([asdict(r) for r in sf_results], f)
+        cache_path = f.name
+
+    # Compare both predictors
+    see = SimpleEarlyExit(cache_path=cache_path, k=k, n=n, x=x)
+    cmp = CrossModelPredictor(source_cache_path=cache_path, target_cache_path=cache_path, k=k, n=n, x=x)
+
+    for i in range(3):
+        see_result = see._predict(i)
+        cmp_result = cmp._predict(i)
+
+        assert see_result.prediction == cmp_result.prediction
+        assert see_result.ground_truth == cmp_result.ground_truth
+
+    os.unlink(cache_path)

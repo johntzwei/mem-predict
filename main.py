@@ -86,7 +86,6 @@ class Evaluator:
             })
 
         df = pd.DataFrame(rows).set_index('method')
-        print(df.to_string())
         return df
 
     def plot_pareto(self, metric: str = 'auroc', save_path: Optional[str] = None) -> Figure:
@@ -197,6 +196,54 @@ class SimpleEarlyExit(Predictor):
         raise NotImplementedError
 
 
+class CrossModelPredictor(Predictor):
+    """Uses source model predictions to predict target model extractability."""
+
+    def __init__(self, source_cache_path: str, target_cache_path: str,
+                 k: int = 30, n: int = 20, x: int = 20) -> None:
+        self.k = k
+        self.n = n
+        self.x = x
+        self.source_cache = self._load_cache(source_cache_path)
+        self.target_cache = self._load_cache(target_cache_path)
+        assert (len(self.source_cache) == len(self.target_cache))
+
+    def _load_cache(self, path: str) -> List[PredictionResult]:
+        with open(path, 'r') as f:
+            return [PredictionResult(**r) for r in json.load(f)]
+
+    def _predict(self, index: int) -> PredictionResult:
+        source = self.source_cache[index]
+        target = self.target_cache[index]
+
+        # Use first x tokens from source prediction as score
+        predicted = source.predicted_tokens[:self.x]
+        target_tokens = target.target_tokens
+        assert (len(target_tokens) == len(predicted))
+
+        matches = sum(p == t for p, t in zip(predicted, target_tokens))
+        prediction = matches / self.x
+
+        return PredictionResult(
+            tokens_generated=self.x,
+            total_tokens=self.k + self.x,
+            prediction=prediction,
+            ground_truth=target.ground_truth,  # from target model
+            predicted_tokens=predicted,
+            target_tokens=target_tokens
+        )
+
+    def predict_batch(self, ds: Dataset) -> List[PredictionResult]:
+        return [self._predict(i) for i in range(len(self.source_cache))]
+
+    @property
+    def name(self) -> str:
+        return f'CrossModel_k{self.k}_n{self.n}_x{self.x}'
+
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
+        raise NotImplementedError
+
+
 def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: str) -> Dataset:
     def tokenize(example: Dict[str, Any]) -> Dict[str, Any]:
         return tokenizer(example["text"], truncation=True, max_length=512)
@@ -221,9 +268,11 @@ def load_cached(evaluator: Evaluator, results_dir: str, predictor: Predictor) ->
 
 
 if __name__ == "__main__":
+    # ===
+    # 1b experiments
+    # ===
     device = 'cuda'
     model_str = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
-
     model = AutoModelForCausalLM.from_pretrained(model_str)
     tokenizer = AutoTokenizer.from_pretrained(model_str)
 
@@ -233,7 +282,7 @@ if __name__ == "__main__":
     tokenized_ds = process_data(ds, tokenizer, split='train')
 
     evaluator = Evaluator()
-    results_dir = "results/wikipedia_passages/"
+    results_dir = "results/wikipedia_passages/1b_100b_perturbed"
 
     predictor = SimpleForward(hf_model=model, device=device)
     results = load_cached(evaluator, results_dir, predictor)
@@ -243,3 +292,40 @@ if __name__ == "__main__":
         cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
         predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
         results = load_cached(evaluator, results_dir, predictor)
+
+    print(evaluator.summary())
+    evaluator.plot_pareto(
+        metric='auroc',
+        save_path='results/pareto_auroc_1b.png'
+    )
+
+    # ===
+    # 8b experiments
+    # ===
+    del (model)
+    model_str = "allegrolab/hubble-8b-100b_toks-perturbed-hf"
+    model = AutoModelForCausalLM.from_pretrained(model_str)
+    tokenizer = AutoTokenizer.from_pretrained(model_str)
+
+    evaluator = Evaluator()
+    results_dir = "results/wikipedia_passages/8b_100b_perturbed"
+
+    predictor = SimpleForward(hf_model=model, device=device)
+    results = load_cached(evaluator, results_dir, predictor)
+
+    x_values = [1, 5, 10, 15, 20]
+    for x in x_values:
+        cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
+        predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+        results = load_cached(evaluator, results_dir, predictor)
+
+    predictor = CrossModelPredictor(
+        source_cache_path='results/wikipedia/1b_100b_perturbed',
+        target_cache_path='results/wikipedia/8b_100b_perturbed'
+    )
+
+    print(evaluator.summary())
+    evaluator.plot_pareto(
+        metric='auroc',
+        save_path='results/pareto_auroc_8b.png'
+    )
