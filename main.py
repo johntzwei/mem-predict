@@ -23,7 +23,7 @@ class Predictor(ABC):
     def __init__(self, hf_model: PreTrainedModel, device: str) -> None:
         self.hf_model = hf_model
         self.device = device
-        hf_model.to(device)
+        self.hf_model.to(device)
 
     @abstractmethod
     def predict(self, example: Dict[str, Any]) -> PredictionResult:
@@ -93,8 +93,10 @@ class Evaluator:
         df = self.summary()
 
         # Get tokens processed for each method
-        max_tokens = max(preds[0].total_tokens for preds in self.predictions.values())
-        df['tokens_pct'] = [self.predictions[m][0].total_tokens / max_tokens * 100 for m in df.index]
+        max_tokens = max(
+            preds[0].total_tokens for preds in self.predictions.values())
+        df['tokens_pct'] = [self.predictions[m]
+                            [0].total_tokens / max_tokens * 100 for m in df.index]
         df = df.sort_values('tokens_pct')
 
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -107,7 +109,6 @@ class Evaluator:
         ax.set_xlabel('Tokens Processed (%)')
         ax.set_ylabel(metric.upper())
         ax.set_title(f'Pareto Curve: Compute vs {metric.upper()}')
-        ax.set_xlim(0, 105)
         ax.grid(True, alpha=0.3)
 
         if save_path:
@@ -226,17 +227,17 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_str)
     tokenizer = AutoTokenizer.from_pretrained(model_str)
 
+    # this dataset is very imbalanced
+    # the number of extractable sequences is small
     ds: DatasetDict = load_dataset('allegrolab/passages_wikipedia')
     tokenized_ds = process_data(ds, tokenizer, split='train')
 
     evaluator = Evaluator()
     results_dir = "results/wikipedia_passages/"
 
-    # SimpleForward
     predictor = SimpleForward(hf_model=model, device=device)
     results = load_cached(evaluator, results_dir, predictor)
 
-    # SimpleEarlyExit
     x_values = [1, 5, 10, 15, 20]
     for x in x_values:
         cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
