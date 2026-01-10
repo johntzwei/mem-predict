@@ -195,6 +195,61 @@ class SimpleEarlyExit(Predictor):
     def predict(self, example) -> PredictionResult:
         raise NotImplementedError
 
+class EarlyExitForward(Predictor):
+    def __init__(self, hf_model, device, k: int = 30, n: int = 20, l: int = 5):
+        super().__init__(hf_model, device=device)
+        self.k = k # prefix length
+        self.n = n # tokens to predict
+        self.l = l # layer index
+
+        # register the hook
+        self.hf_model.model.layers[l].mlp.register_forward_hook(self._hook_fn)
+        self.intermediate_output = {}
+        
+    def _hook_fn(self, module, input, output):
+        self.intermediate_output['output'] = output
+
+    def _early_forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        self.hf_model.eval()
+        with torch.no_grad():
+            # still wasting time here by running full forward pass...
+            logits = self.hf_model.forward(input_ids=input_ids).logits
+            early_output = self.intermediate_output['output']
+
+            # apply embedding layer to get logits from early output
+            early_logits = self.hf_model.lm_head(self.hf_model.model.norm(early_output))
+
+        return early_logits
+        
+    def predict(self, example) -> PredictionResult:
+        input_ids = example['input_ids'][:self.k +
+                                         self.n].unsqueeze(0).to(self.device)
+        assert (input_ids.shape[1] == self.k + self.n)
+
+        early_logits = self._early_forward(input_ids=input_ids)
+
+        # logits[i] predicts token i+1; we want predictions for positions k to k+n-1
+        predicted = torch.argmax(
+            early_logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
+        target = example['input_ids'][self.k: self.k + self.n].to(self.device)
+
+        matches = (predicted == target)
+        prediction = matches.float().mean().item()
+        ground_truth = matches.all().item()
+
+        return PredictionResult(
+            tokens_generated=self.n,
+            total_tokens=self.k + self.n,
+            prediction=prediction,
+            ground_truth=ground_truth,
+            predicted_tokens=predicted.tolist(),
+            target_tokens=target.tolist()
+        )
+    
+    @property
+    def name(self) -> str:
+        return f'EarlyExitForward_k{self.k}_n{self.n}_l{self.l}'
+
 
 def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: str) -> Dataset:
     def tokenize(example):
@@ -226,6 +281,24 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_str)
     tokenizer = AutoTokenizer.from_pretrained(model_str)
 
+
+    # intermediate_output = {}
+
+    # def hook_fn(module, input, output):
+    #     intermediate_output['output'] = output
+
+    # # Register hook on specific layer (e.g., layer 6)
+    # hook = model.model.layers[6].mlp.register_forward_hook(hook_fn)
+
+    # inputs = tokenizer("Hello world", return_tensors="pt")
+    # outputs = model(**inputs)
+    # print(outputs)
+
+    # layer_6_out = intermediate_output['output']
+    # print("Layer 6 MLP output:", layer_6_out, layer_6_out.device)
+
+    # print(model.lm_head(model.model.norm(layer_6_out)))
+
     ds: DatasetDict = load_dataset('allegrolab/passages_wikipedia')
     tokenized_ds = process_data(ds, tokenizer, split='train')
 
@@ -233,12 +306,15 @@ if __name__ == "__main__":
     results_dir = "results/wikipedia_passages/"
 
     # SimpleForward
-    predictor = SimpleForward(hf_model=model, device=device)
-    results = load_cached(evaluator, results_dir, predictor)
+    # predictor = SimpleForward(hf_model=model, device=device)
+    # EarlyExitForward
+    # predictor = EarlyExitForward(hf_model=model, device=device)
+    # results = load_cached(evaluator, results_dir, predictor)
 
+    path = 'EarlyExitForward_k30_n20_l5.json'
     # SimpleEarlyExit
     x_values = [1, 5, 10, 15, 20]
     for x in x_values:
-        cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
+        cache_path = os.path.join(results_dir, path)
         predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
         results = load_cached(evaluator, results_dir, predictor)
