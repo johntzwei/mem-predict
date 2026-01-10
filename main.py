@@ -4,31 +4,32 @@ import os
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import asdict, dataclass
 
 import torch
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 
 class Predictor(ABC):
-    def __init__(self, hf_model, device):
+    def __init__(self, hf_model: PreTrainedModel, device: str) -> None:
         self.hf_model = hf_model
-        self.device: str = device
-        hf_model.to(device)
+        self.device = device
+        self.hf_model.to(device)
 
     @abstractmethod
-    def predict(self, example) -> PredictionResult:
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
         pass
 
-    def predict_batch(self, ds) -> List[PredictionResult]:
+    def predict_batch(self, ds: Dataset) -> List[PredictionResult]:
         return [self.predict(example) for example in ds]
 
     @property
@@ -48,19 +49,19 @@ class PredictionResult:
 
 
 class Evaluator:
-    def __init__(self):
-        self.predictions: Dict[str, List[PredictionResult]] = defaultdict(list)
+    def __init__(self) -> None:
+        self.predictions = defaultdict(list)
 
-    def add_results(self, method: str, results: List[PredictionResult]):
+    def add_results(self, method: str, results: List[PredictionResult]) -> None:
         self.predictions[method] = results
 
-    def save_results(self, results_dir: str, method: str):
+    def save_results(self, results_dir: str, method: str) -> None:
         data = [asdict(r) for r in self.predictions[method]]
-        os.makedirs(os.path.dirname(results_dir), exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
         with open(os.path.join(results_dir, f'{method}.json'), 'w') as f:
             json.dump(data, f, indent=2)
 
-    def load_results(self, results_dir: str, method: str):
+    def load_results(self, results_dir: str, method: str) -> None:
         with open(os.path.join(results_dir, f'{method}.json'), 'r') as f:
             data = json.load(f)
             self.add_results(
@@ -85,15 +86,16 @@ class Evaluator:
             })
 
         df = pd.DataFrame(rows).set_index('method')
-        print(df.to_string())
         return df
 
-    def plot_pareto(self, metric: str = 'auroc', save_path: Optional[str] = None):
+    def plot_pareto(self, metric: str = 'auroc', save_path: Optional[str] = None) -> Figure:
         df = self.summary()
 
         # Get tokens processed for each method
-        max_tokens = max(preds[0].total_tokens for preds in self.predictions.values())
-        df['tokens_pct'] = [self.predictions[m][0].total_tokens / max_tokens * 100 for m in df.index]
+        max_tokens = max(
+            preds[0].total_tokens for preds in self.predictions.values())
+        df['tokens_pct'] = [self.predictions[m]
+                            [0].total_tokens / max_tokens * 100 for m in df.index]
         df = df.sort_values('tokens_pct')
 
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -106,7 +108,6 @@ class Evaluator:
         ax.set_xlabel('Tokens Processed (%)')
         ax.set_ylabel(metric.upper())
         ax.set_title(f'Pareto Curve: Compute vs {metric.upper()}')
-        ax.set_xlim(0, 105)
         ax.grid(True, alpha=0.3)
 
         if save_path:
@@ -116,12 +117,12 @@ class Evaluator:
 
 
 class SimpleForward(Predictor):
-    def __init__(self, hf_model, device, k: int = 30, n: int = 20):
+    def __init__(self, hf_model: PreTrainedModel, device: str, k: int = 30, n: int = 20) -> None:
         super().__init__(hf_model, device)
         self.k = k  # prefix length
         self.n = n  # tokens to predict
 
-    def predict(self, example) -> PredictionResult:
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
         input_ids = example['input_ids'][:self.k +
                                          self.n].unsqueeze(0).to(self.device)
         assert (input_ids.shape[1] == self.k + self.n)
@@ -156,17 +157,16 @@ class SimpleForward(Predictor):
 class SimpleEarlyExit(Predictor):
     """Evaluates early exit predictions from cached SimpleForward results."""
 
-    def __init__(self, cache_path: str, k: int = 30, n: int = 20, x: int = 5):
+    def __init__(self, cache_path: str, k: int = 30, n: int = 20, x: int = 5) -> None:
         self.k = k
         self.n = n
         self.x = x
         with open(cache_path, 'r') as f:
             data = json.load(f)
-        self.cache: List[PredictionResult] = [
-            PredictionResult(**r) for r in data]
+        self.cache = [PredictionResult(**r) for r in data]
 
     def _predict(self, index: int) -> PredictionResult:
-        cached: PredictionResult = self.cache[index]
+        cached = self.cache[index]
         assert (cached.predicted_tokens and cached.target_tokens)
 
         predicted = cached.predicted_tokens[:self.x]
@@ -192,7 +192,55 @@ class SimpleEarlyExit(Predictor):
     def name(self) -> str:
         return f'SimpleEarlyExit_k{self.k}_n{self.n}_x{self.x}'
 
-    def predict(self, example) -> PredictionResult:
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
+        raise NotImplementedError
+
+
+class CrossModelPredictor(Predictor):
+    """Uses source model predictions to predict target model extractability."""
+
+    def __init__(self, source_cache_path: str, target_cache_path: str,
+                 k: int = 30, n: int = 20, x: int = 20) -> None:
+        self.k = k
+        self.n = n
+        self.x = x
+        self.source_cache = self._load_cache(source_cache_path)
+        self.target_cache = self._load_cache(target_cache_path)
+        assert (len(self.source_cache) == len(self.target_cache))
+
+    def _load_cache(self, path: str) -> List[PredictionResult]:
+        with open(path, 'r') as f:
+            return [PredictionResult(**r) for r in json.load(f)]
+
+    def _predict(self, index: int) -> PredictionResult:
+        source = self.source_cache[index]
+        target = self.target_cache[index]
+
+        # Use first x tokens from source prediction as score
+        predicted = source.predicted_tokens[:self.x]
+        target_tokens = target.target_tokens
+        assert (len(target_tokens) == len(predicted))
+
+        matches = sum(p == t for p, t in zip(predicted, target_tokens))
+        prediction = matches / self.x
+
+        return PredictionResult(
+            tokens_generated=self.x,
+            total_tokens=self.k + self.x,
+            prediction=prediction,
+            ground_truth=target.ground_truth,  # from target model
+            predicted_tokens=predicted,
+            target_tokens=target_tokens
+        )
+
+    def predict_batch(self, ds: Dataset) -> List[PredictionResult]:
+        return [self._predict(i) for i in range(len(self.source_cache))]
+
+    @property
+    def name(self) -> str:
+        return f'CrossModel_k{self.k}_n{self.n}_x{self.x}'
+
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
         raise NotImplementedError
 
 class EarlyExitForward(Predictor):
@@ -252,10 +300,10 @@ class EarlyExitForward(Predictor):
 
 
 def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: str) -> Dataset:
-    def tokenize(example):
+    def tokenize(example: Dict[str, Any]) -> Dict[str, Any]:
         return tokenizer(example["text"], truncation=True, max_length=512)
 
-    tokenized_ds: Dataset = dataset[split].map(tokenize, batched=True)
+    tokenized_ds = dataset[split].map(tokenize, batched=True)
     tokenized_ds.set_format("torch")
     return tokenized_ds
 
@@ -275,28 +323,73 @@ def load_cached(evaluator: Evaluator, results_dir: str, predictor: Predictor) ->
 
 
 if __name__ == "__main__":
+    # ===
+    # 1b experiments
+    # ===
     device = 'cuda'
     model_str = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
-
     model = AutoModelForCausalLM.from_pretrained(model_str)
     tokenizer = AutoTokenizer.from_pretrained(model_str)
 
+    # this dataset is very imbalanced
+    # the number of extractable sequences is small
     ds: DatasetDict = load_dataset('allegrolab/passages_wikipedia')
     tokenized_ds = process_data(ds, tokenizer, split='train')
 
     evaluator = Evaluator()
-    results_dir = "results/wikipedia_passages/"
+    base_results_dir = "results/wikipedia_passages/1b_100b_perturbed"
 
     # SimpleForward
+    # simple_forward_dir = f"{base_results_dir}/simple_forward"
     # predictor = SimpleForward(hf_model=model, device=device)
-    # EarlyExitForward
-    predictor = EarlyExitForward(hf_model=model, device=device)
-    results = load_cached(evaluator, results_dir, predictor)
+    # results = load_cached(evaluator, simple_forward_dir, predictor)
 
-    path = 'EarlyExitForward_k30_n20_l5.json'
-    # SimpleEarlyExit
+    # EarlyExitForward
+    l = 5  # layer to exit at
+    early_exit_dir = f"{base_results_dir}/early_exit_l{l}"
+    predictor = EarlyExitForward(hf_model=model, device=device, l=l)
+    results = load_cached(evaluator, early_exit_dir, predictor)
+
+    # SimpleEarlyExit (uses EarlyExitForward cache)
     x_values = [1, 5, 10, 15, 20]
     for x in x_values:
-        cache_path = os.path.join(results_dir, path)
+        cache_path = os.path.join(early_exit_dir, f'EarlyExitForward_k30_n20_l{l}.json')
         predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
-        results = load_cached(evaluator, results_dir, predictor)
+        results = load_cached(evaluator, early_exit_dir, predictor)
+
+    print(evaluator.summary())
+    evaluator.plot_pareto(
+        metric='auroc',
+        save_path='results/pareto_auroc_1b.png'
+    )
+
+    # # ===
+    # # 8b experiments
+    # # ===
+    # del (model)
+    # model_str = "allegrolab/hubble-8b-100b_toks-perturbed-hf"
+    # model = AutoModelForCausalLM.from_pretrained(model_str)
+    # tokenizer = AutoTokenizer.from_pretrained(model_str)
+
+    # evaluator = Evaluator()
+    # results_dir = "results/wikipedia_passages/8b_100b_perturbed"
+
+    # predictor = SimpleForward(hf_model=model, device=device)
+    # results = load_cached(evaluator, results_dir, predictor)
+
+    # x_values = [1, 5, 10, 15, 20]
+    # for x in x_values:
+    #     cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
+    #     predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+    #     results = load_cached(evaluator, results_dir, predictor)
+
+    # predictor = CrossModelPredictor(
+    #     source_cache_path='results/wikipedia/1b_100b_perturbed',
+    #     target_cache_path='results/wikipedia/8b_100b_perturbed'
+    # )
+
+    # print(evaluator.summary())
+    # evaluator.plot_pareto(
+    #     metric='auroc',
+    #     save_path='results/pareto_auroc_8b.png'
+    # )
