@@ -281,24 +281,6 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_str)
     tokenizer = AutoTokenizer.from_pretrained(model_str)
 
-
-    # intermediate_output = {}
-
-    # def hook_fn(module, input, output):
-    #     intermediate_output['output'] = output
-
-    # # Register hook on specific layer (e.g., layer 6)
-    # hook = model.model.layers[6].mlp.register_forward_hook(hook_fn)
-
-    # inputs = tokenizer("Hello world", return_tensors="pt")
-    # outputs = model(**inputs)
-    # print(outputs)
-
-    # layer_6_out = intermediate_output['output']
-    # print("Layer 6 MLP output:", layer_6_out, layer_6_out.device)
-
-    # print(model.lm_head(model.model.norm(layer_6_out)))
-
     ds: DatasetDict = load_dataset('allegrolab/passages_wikipedia')
     tokenized_ds = process_data(ds, tokenizer, split='train')
 
@@ -308,8 +290,8 @@ if __name__ == "__main__":
     # SimpleForward
     # predictor = SimpleForward(hf_model=model, device=device)
     # EarlyExitForward
-    # predictor = EarlyExitForward(hf_model=model, device=device)
-    # results = load_cached(evaluator, results_dir, predictor)
+    predictor = EarlyExitForward(hf_model=model, device=device)
+    results = load_cached(evaluator, results_dir, predictor)
 
     path = 'EarlyExitForward_k30_n20_l5.json'
     # SimpleEarlyExit
