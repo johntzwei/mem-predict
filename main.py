@@ -264,7 +264,7 @@ class EarlyExitForward(Predictor):
         
     def _hook_fn(self, module, input, output):
         self.intermediate_output['output'] = output
-        # raise EarlyExitException()
+        raise EarlyExitException()
 
     def _early_forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         self.hf_model.eval()
@@ -364,10 +364,12 @@ if __name__ == "__main__":
     #     results = load_cached(evaluator, simple_forward_dir, predictor)
 
     # EarlyExitForward
-    l = 14  # layer to exit at
+    l = 13  # layer to exit at
     early_exit_dir = f"{base_results_dir}/early_exit_l{l}"
     predictor = EarlyExitForward(hf_model=model, device=device, l=l)
     results = load_cached(evaluator, early_exit_dir, predictor)
+
+    print(predictor.hf_model.device)
 
     # SimpleEarlyExit (uses EarlyExitForward cache)
     x_values = [1, 5, 10, 15, 20]
