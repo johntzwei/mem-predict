@@ -57,7 +57,7 @@ class Evaluator:
 
     def save_results(self, results_dir: str, method: str) -> None:
         data = [asdict(r) for r in self.predictions[method]]
-        os.makedirs(os.path.dirname(results_dir), exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
         with open(os.path.join(results_dir, f'{method}.json'), 'w') as f:
             json.dump(data, f, indent=2)
 
@@ -243,6 +243,73 @@ class CrossModelPredictor(Predictor):
     def predict(self, example: Dict[str, Any]) -> PredictionResult:
         raise NotImplementedError
 
+# trick to exit early in the forward pass with a hook and exception
+class EarlyExitException(Exception):
+    pass
+
+class EarlyExitForward(Predictor):
+    def __init__(self, hf_model, device, k: int = 30, n: int = 20, l: int = 5):
+        super().__init__(hf_model, device=device)
+        self.k = k # prefix length
+        self.n = n # tokens to predict
+        self.l = l # layer index
+
+        # register the hook
+        self._hook_handle = self.hf_model.model.layers[l].register_forward_hook(self._hook_fn)
+        self.intermediate_output = {}
+
+    def remove_hook(self) -> None:
+        """Remove the forward hook to prevent memory leaks."""
+        self._hook_handle.remove()
+        
+    def _hook_fn(self, module, input, output):
+        self.intermediate_output['output'] = output
+        raise EarlyExitException()
+
+    def _early_forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        self.hf_model.eval()
+        with torch.no_grad():
+            try:
+                self.hf_model.forward(input_ids=input_ids)
+            except EarlyExitException:
+                pass
+
+            early_output = self.intermediate_output['output']
+ 
+            # apply norm and lm_head to get logits from early output
+            early_logits = self.hf_model.lm_head(self.hf_model.model.norm(early_output))
+
+        return early_logits
+        
+    def predict(self, example) -> PredictionResult:
+        input_ids = example['input_ids'][:self.k +
+                                         self.n].unsqueeze(0).to(self.device)
+        assert (input_ids.shape[1] == self.k + self.n)
+
+        early_logits = self._early_forward(input_ids=input_ids)
+
+        # logits[i] predicts token i+1; we want predictions for positions k to k+n-1
+        predicted = torch.argmax(
+            early_logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
+        target = example['input_ids'][self.k: self.k + self.n].to(self.device)
+
+        matches = (predicted == target)
+        prediction = matches.float().mean().item()
+        ground_truth = matches.all().item()
+
+        return PredictionResult(
+            tokens_generated=self.n,
+            total_tokens=self.k + self.n,
+            prediction=prediction,
+            ground_truth=ground_truth,
+            predicted_tokens=predicted.tolist(),
+            target_tokens=target.tolist()
+        )
+    
+    @property
+    def name(self) -> str:
+        return f'EarlyExitForward_k{self.k}_n{self.n}_l{self.l}'
+
 
 def process_data(dataset: DatasetDict, tokenizer: PreTrainedTokenizer, split: str) -> Dataset:
     def tokenize(example: Dict[str, Any]) -> Dict[str, Any]:
@@ -282,16 +349,34 @@ if __name__ == "__main__":
     tokenized_ds = process_data(ds, tokenizer, split='train')
 
     evaluator = Evaluator()
-    results_dir = "results/wikipedia_passages/1b_100b_perturbed"
+    base_results_dir = "results/wikipedia_passages/1b_100b_perturbed"
 
-    predictor = SimpleForward(hf_model=model, device=device)
-    results = load_cached(evaluator, results_dir, predictor)
+    # # SimpleForward
+    # simple_forward_dir = f"{base_results_dir}/simple_forward"
+    # predictor = SimpleForward(hf_model=model, device=device)
+    # results = load_cached(evaluator, simple_forward_dir, predictor)
 
+    # # SimpleEarlyExit (uses SimpleForward cache)
+    # x_values = [1, 5, 10, 15, 20]
+    # for x in x_values:
+    #     cache_path = os.path.join(simple_forward_dir, 'SimpleForward_k30_n20.json')
+    #     predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+    #     results = load_cached(evaluator, simple_forward_dir, predictor)
+
+    # EarlyExitForward
+    l = 13  # layer to exit at
+    early_exit_dir = f"{base_results_dir}/early_exit_l{l}"
+    predictor = EarlyExitForward(hf_model=model, device=device, l=l)
+    results = load_cached(evaluator, early_exit_dir, predictor)
+
+    print(predictor.hf_model.device)
+
+    # SimpleEarlyExit (uses EarlyExitForward cache)
     x_values = [1, 5, 10, 15, 20]
     for x in x_values:
-        cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
+        cache_path = os.path.join(early_exit_dir, f'EarlyExitForward_k30_n20_l{l}.json')
         predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
-        results = load_cached(evaluator, results_dir, predictor)
+        results = load_cached(evaluator, early_exit_dir, predictor)
 
     print(evaluator.summary())
     evaluator.plot_pareto(
@@ -299,33 +384,33 @@ if __name__ == "__main__":
         save_path='results/pareto_auroc_1b.png'
     )
 
-    # ===
-    # 8b experiments
-    # ===
-    del (model)
-    model_str = "allegrolab/hubble-8b-100b_toks-perturbed-hf"
-    model = AutoModelForCausalLM.from_pretrained(model_str)
-    tokenizer = AutoTokenizer.from_pretrained(model_str)
+    # # ===
+    # # 8b experiments
+    # # ===
+    # del (model)
+    # model_str = "allegrolab/hubble-8b-100b_toks-perturbed-hf"
+    # model = AutoModelForCausalLM.from_pretrained(model_str)
+    # tokenizer = AutoTokenizer.from_pretrained(model_str)
 
-    evaluator = Evaluator()
-    results_dir = "results/wikipedia_passages/8b_100b_perturbed"
+    # evaluator = Evaluator()
+    # results_dir = "results/wikipedia_passages/8b_100b_perturbed"
 
-    predictor = SimpleForward(hf_model=model, device=device)
-    results = load_cached(evaluator, results_dir, predictor)
+    # predictor = SimpleForward(hf_model=model, device=device)
+    # results = load_cached(evaluator, results_dir, predictor)
 
-    x_values = [1, 5, 10, 15, 20]
-    for x in x_values:
-        cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
-        predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
-        results = load_cached(evaluator, results_dir, predictor)
+    # x_values = [1, 5, 10, 15, 20]
+    # for x in x_values:
+    #     cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
+    #     predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+    #     results = load_cached(evaluator, results_dir, predictor)
 
-    predictor = CrossModelPredictor(
-        source_cache_path='results/wikipedia/1b_100b_perturbed',
-        target_cache_path='results/wikipedia/8b_100b_perturbed'
-    )
+    # predictor = CrossModelPredictor(
+    #     source_cache_path='results/wikipedia/1b_100b_perturbed',
+    #     target_cache_path='results/wikipedia/8b_100b_perturbed'
+    # )
 
-    print(evaluator.summary())
-    evaluator.plot_pareto(
-        metric='auroc',
-        save_path='results/pareto_auroc_8b.png'
-    )
+    # print(evaluator.summary())
+    # evaluator.plot_pareto(
+    #     metric='auroc',
+    #     save_path='results/pareto_auroc_8b.png'
+    # )
