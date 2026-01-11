@@ -243,6 +243,10 @@ class CrossModelPredictor(Predictor):
     def predict(self, example: Dict[str, Any]) -> PredictionResult:
         raise NotImplementedError
 
+# trick to exit early in the forward pass with a hook and exception
+class EarlyExitException(Exception):
+    pass
+
 class EarlyExitForward(Predictor):
     def __init__(self, hf_model, device, k: int = 30, n: int = 20, l: int = 5):
         super().__init__(hf_model, device=device)
@@ -251,20 +255,28 @@ class EarlyExitForward(Predictor):
         self.l = l # layer index
 
         # register the hook
-        self.hf_model.model.layers[l].mlp.register_forward_hook(self._hook_fn)
+        self._hook_handle = self.hf_model.model.layers[l].register_forward_hook(self._hook_fn)
         self.intermediate_output = {}
+
+    def remove_hook(self) -> None:
+        """Remove the forward hook to prevent memory leaks."""
+        self._hook_handle.remove()
         
     def _hook_fn(self, module, input, output):
         self.intermediate_output['output'] = output
+        # raise EarlyExitException()
 
     def _early_forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         self.hf_model.eval()
         with torch.no_grad():
-            # still wasting time here by running full forward pass...
-            logits = self.hf_model.forward(input_ids=input_ids).logits
-            early_output = self.intermediate_output['output']
+            try:
+                self.hf_model.forward(input_ids=input_ids)
+            except EarlyExitException:
+                pass
 
-            # apply embedding layer to get logits from early output
+            early_output = self.intermediate_output['output']
+ 
+            # apply norm and lm_head to get logits from early output
             early_logits = self.hf_model.lm_head(self.hf_model.model.norm(early_output))
 
         return early_logits
@@ -339,13 +351,20 @@ if __name__ == "__main__":
     evaluator = Evaluator()
     base_results_dir = "results/wikipedia_passages/1b_100b_perturbed"
 
-    # SimpleForward
+    # # SimpleForward
     # simple_forward_dir = f"{base_results_dir}/simple_forward"
     # predictor = SimpleForward(hf_model=model, device=device)
     # results = load_cached(evaluator, simple_forward_dir, predictor)
 
+    # # SimpleEarlyExit (uses SimpleForward cache)
+    # x_values = [1, 5, 10, 15, 20]
+    # for x in x_values:
+    #     cache_path = os.path.join(simple_forward_dir, 'SimpleForward_k30_n20.json')
+    #     predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+    #     results = load_cached(evaluator, simple_forward_dir, predictor)
+
     # EarlyExitForward
-    l = 5  # layer to exit at
+    l = 14  # layer to exit at
     early_exit_dir = f"{base_results_dir}/early_exit_l{l}"
     predictor = EarlyExitForward(hf_model=model, device=device, l=l)
     results = load_cached(evaluator, early_exit_dir, predictor)
