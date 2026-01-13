@@ -46,10 +46,6 @@ class PredictionResult:
     ground_truth: Optional[bool]
     predicted_tokens: Optional[List[int]] = None
     target_tokens: Optional[List[int]] = None
-    early_prediction: Optional[float] = None
-    early_ground_truth: Optional[bool] = None
-    early_predicted_tokens: Optional[List[int]] = None
-
 
 class Evaluator:
     def __init__(self) -> None:
@@ -120,10 +116,46 @@ class Evaluator:
 
 
 class SimpleForward(Predictor):
-    def __init__(self, hf_model: PreTrainedModel, device: str, k: int = 30, n: int = 20, l: int = -1) -> None:
+    def __init__(self, hf_model: PreTrainedModel, device: str, k: int = 30, n: int = 20) -> None:
         super().__init__(hf_model, device)
         self.k = k  # prefix length
         self.n = n  # tokens to predict
+
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
+        input_ids = example['input_ids'][:self.k +
+                                         self.n].unsqueeze(0).to(self.device)
+        assert (input_ids.shape[1] == self.k + self.n)
+
+        self.hf_model.eval()
+        with torch.no_grad():
+            logits = self.hf_model.forward(input_ids=input_ids).logits
+
+        # logits[i] predicts token i+1; we want predictions for positions k to k+n-1
+        predicted = torch.argmax(
+            logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
+        target = example['input_ids'][self.k: self.k + self.n].to(self.device)
+
+        matches = (predicted == target)
+        prediction = matches.float().mean().item()
+        ground_truth = matches.all().item()
+
+        return PredictionResult(
+            tokens_generated=self.n,
+            total_tokens=self.k + self.n,
+            prediction=prediction,
+            ground_truth=ground_truth,
+            predicted_tokens=predicted.tolist(),
+            target_tokens=target.tolist()
+        )
+
+    @property
+    def name(self) -> str:
+        return f'SimpleForward_k{self.k}_n{self.n}'
+
+
+class EarlyLayerExit(SimpleForward):
+    def __init__(self, hf_model: PreTrainedModel, device: str, l, k: int = 30, n: int = 20) -> None:
+        super().__init__(hf_model, device, k=k, n=n)
         self.early_layer = l  # length to exit at, 15 is default since its the last layer
 
         # register the hook
@@ -138,50 +170,33 @@ class SimpleForward(Predictor):
         self.intermediate_output['output'] = output
 
     def predict(self, example: Dict[str, Any]) -> PredictionResult:
-        input_ids = example['input_ids'][:self.k +
-                                         self.n].unsqueeze(0).to(self.device)
-        assert (input_ids.shape[1] == self.k + self.n)
+        sf_result = super().predict(example)
 
         self.hf_model.eval()
         with torch.no_grad():
-            logits = self.hf_model.forward(input_ids=input_ids).logits
+            early_output = self.intermediate_output['output']
+            early_logits = self.hf_model.lm_head(self.hf_model.model.norm(early_output))
 
-            # if we want early output apply norm and lm_head
-            if self.early_layer != -1:
-                early_output = self.intermediate_output['output']
-                early_logits = self.hf_model.lm_head(self.hf_model.model.norm(early_output))
-
-        # logits[i] predicts token i+1; we want predictions for positions k to k+n-1
-        predicted = torch.argmax(
-            logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
+        # Compute the prediction for the early output
         target = example['input_ids'][self.k: self.k + self.n].to(self.device)
+        early_predicted = torch.argmax(early_logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
+        early_matches = (early_predicted == target)
 
-        matches = (predicted == target)
-        prediction = matches.float().mean().item()
-        ground_truth = matches.all().item()
+        early_prediction = early_matches.float().mean().item()
+        early_predicted_tokens = early_predicted.tolist()
 
-        result = PredictionResult(
-            tokens_generated=self.n,
+        return PredictionResult(
+            tokens_generated=self.n * self.early_layer / len(self.hf_model.model.layers),
             total_tokens=self.k + self.n,
-            prediction=prediction,
-            ground_truth=ground_truth,
-            predicted_tokens=predicted.tolist(),
+            prediction=early_prediction,
+            ground_truth=sf_result.ground_truth,
+            predicted_tokens=early_predicted_tokens,
             target_tokens=target.tolist()
         )
 
-        # Compute the prediction for the early output
-        if self.early_layer != -1:
-            early_predicted = torch.argmax(early_logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
-            early_matches = (early_predicted == target)
-            result.early_prediction = early_matches.float().mean().item()
-            result.early_ground_truth = early_matches.all().item()
-            result.early_predicted_tokens = early_predicted.tolist()
-
-        return result
-
     @property
     def name(self) -> str:
-        return f'SimpleForward_k{self.k}_n{self.n}'
+        return f'EarlyLayerExit_k{self.k}_n{self.n}_l{self.early_layer}'
 
 
 class SimpleEarlyExit(Predictor):
@@ -313,24 +328,42 @@ if __name__ == "__main__":
     evaluator = Evaluator()
     base_results_dir = "results/wikipedia_passages/1b_100b_perturbed"
 
-    # SimpleForward with early layer exit result
-    l = 13
-    predictor = SimpleForward(hf_model=model, device=device, l=l)
+    # SimpleForward 
+    predictor = SimpleForward(hf_model=model, device=device)
     results = load_cached(evaluator, base_results_dir, predictor)
 
-    # SimpleEarlyExit (uses SimpleForward cache)
-    x_values = [1, 5, 10, 15, 20]
-    for x in x_values:
-        cache_path = os.path.join(base_results_dir, 'SimpleForward_k30_n20.json')
-        predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+    # # SimpleEarlyExit (uses SimpleForward cache)
+    # x_values = [1, 5, 10, 15, 20]
+    # for x in x_values:
+    #     cache_path = os.path.join(base_results_dir, 'SimpleForward_k30_n20.json')
+    #     predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+    #     results = load_cached(evaluator, base_results_dir, predictor)
+
+    # print(evaluator.summary())
+    # evaluator.plot_pareto(
+    #     metric='auroc',
+    #     save_path='results/pareto_auroc_1b.png'
+    # )
+
+    # EarlyLayerExit with early layer exit result
+    for l in range(12, 15):
+        predictor = EarlyLayerExit(hf_model=model, device=device, l=l)
         results = load_cached(evaluator, base_results_dir, predictor)
 
-    print(evaluator.summary())
-    evaluator.plot_pareto(
-        metric='auroc',
-        save_path='results/pareto_auroc_1b.png'
-    )
+        # SimpleEarlyExit (uses SimpleForward cache)
+        # x_values = [1, 5, 10, 15, 20]
+        # for x in x_values:
+        #     cache_path = os.path.join(base_results_dir, f'EarlyLayerExit_k30_n20_l{l}.json')
+        #     predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+        #     results = load_cached(evaluator, base_results_dir, predictor)
 
+        print(evaluator.summary())
+        evaluator.plot_pareto(
+            metric='auroc',
+            save_path=f'results/early_exit_l{l}_pareto_auroc_1b.png'
+        )
+
+    '''
     # ===
     # 8b experiments
     # ===
@@ -361,3 +394,4 @@ if __name__ == "__main__":
         metric='auroc',
         save_path='results/pareto_auroc_8b.png'
     )
+    '''
