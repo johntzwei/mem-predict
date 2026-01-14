@@ -57,7 +57,7 @@ class Evaluator:
 
     def save_results(self, results_dir: str, method: str) -> None:
         data = [asdict(r) for r in self.predictions[method]]
-        os.makedirs(os.path.dirname(results_dir), exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
         with open(os.path.join(results_dir, f'{method}.json'), 'w') as f:
             json.dump(data, f, indent=2)
 
@@ -152,6 +152,52 @@ class SimpleForward(Predictor):
     @property
     def name(self) -> str:
         return f'SimpleForward_k{self.k}_n{self.n}'
+
+
+class EarlyLayerExit(SimpleForward):
+    def __init__(self, hf_model: PreTrainedModel, device: str, l, k: int = 30, n: int = 20) -> None:
+        super().__init__(hf_model, device, k=k, n=n)
+        self.early_layer = l  # length to exit at, 15 is default since its the last layer
+
+        # register the hook
+        self._hook_handle = self.hf_model.model.layers[l].register_forward_hook(self._hook_fn)
+        self.intermediate_output = {}
+
+    def remove_hook(self) -> None:
+        """Remove the forward hook to prevent memory leaks."""
+        self._hook_handle.remove()
+        
+    def _hook_fn(self, module, input, output):
+        self.intermediate_output['output'] = output
+
+    def predict(self, example: Dict[str, Any]) -> PredictionResult:
+        sf_result = super().predict(example)
+
+        self.hf_model.eval()
+        with torch.no_grad():
+            early_output = self.intermediate_output['output']
+            early_logits = self.hf_model.lm_head(self.hf_model.model.norm(early_output))
+
+        # Compute the prediction for the early output
+        target = example['input_ids'][self.k: self.k + self.n].to(self.device)
+        early_predicted = torch.argmax(early_logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
+        early_matches = (early_predicted == target)
+
+        early_prediction = early_matches.float().mean().item()
+        early_predicted_tokens = early_predicted.tolist()
+
+        return PredictionResult(
+            tokens_generated=self.n * self.early_layer / len(self.hf_model.model.layers),
+            total_tokens=self.k + self.n,
+            prediction=early_prediction,
+            ground_truth=sf_result.ground_truth,
+            predicted_tokens=early_predicted_tokens,
+            target_tokens=target.tolist()
+        )
+
+    @property
+    def name(self) -> str:
+        return f'EarlyLayerExit_k{self.k}_n{self.n}_l{self.early_layer}'
 
 
 class SimpleEarlyExit(Predictor):
