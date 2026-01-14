@@ -92,14 +92,17 @@ class Evaluator:
         df = self.summary()
 
         # Get tokens processed for each method
-        max_tokens = max(
-            preds[0].total_tokens for preds in self.predictions.values())
-        df['tokens_pct'] = [self.predictions[m]
-                            [0].total_tokens / max_tokens * 100 for m in df.index]
+        total_tokens_by_method = [
+            sum(p.total_tokens for p in preds) for preds in self.predictions.values()]
+        tokens_generated_per_method = [
+            sum(p.tokens_generated for p in preds) for preds in self.predictions.values()]
+
+        df['tokens_pct'] = [gt / tt for gt,
+                            tt in zip(tokens_generated_per_method, total_tokens_by_method)]
         df = df.sort_values('tokens_pct')
 
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.plot(df['tokens_pct'], df[metric], 'o-', markersize=8)
+        ax.plot(df['tokens_pct'], df[metric], 'o', markersize=8)
 
         for _, row in df.iterrows():
             ax.annotate(row.name, (row['tokens_pct'], row[metric]),
@@ -160,13 +163,14 @@ class EarlyLayerExit(SimpleForward):
         self.early_layer = l  # length to exit at, 15 is default since its the last layer
 
         # register the hook
-        self._hook_handle = self.hf_model.model.layers[l].register_forward_hook(self._hook_fn)
+        self._hook_handle = self.hf_model.model.layers[l].register_forward_hook(
+            self._hook_fn)
         self.intermediate_output = {}
 
     def remove_hook(self) -> None:
         """Remove the forward hook to prevent memory leaks."""
         self._hook_handle.remove()
-        
+
     def _hook_fn(self, module, input, output):
         self.intermediate_output['output'] = output
 
@@ -176,18 +180,21 @@ class EarlyLayerExit(SimpleForward):
         self.hf_model.eval()
         with torch.no_grad():
             early_output = self.intermediate_output['output']
-            early_logits = self.hf_model.lm_head(self.hf_model.model.norm(early_output))
+            early_logits = self.hf_model.lm_head(
+                self.hf_model.model.norm(early_output))
 
         # Compute the prediction for the early output
         target = example['input_ids'][self.k: self.k + self.n].to(self.device)
-        early_predicted = torch.argmax(early_logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
+        early_predicted = torch.argmax(
+            early_logits, dim=-1).squeeze(0)[self.k - 1: self.k + self.n - 1]
         early_matches = (early_predicted == target)
 
         early_prediction = early_matches.float().mean().item()
         early_predicted_tokens = early_predicted.tolist()
 
         return PredictionResult(
-            tokens_generated=self.n * self.early_layer / len(self.hf_model.model.layers),
+            tokens_generated=(self.k + self.n) *
+            (self.early_layer / len(self.hf_model.model.layers)),
             total_tokens=self.k + self.n,
             prediction=early_prediction,
             ground_truth=sf_result.ground_truth,
@@ -200,7 +207,7 @@ class EarlyLayerExit(SimpleForward):
         return f'EarlyLayerExit_k{self.k}_n{self.n}_l{self.early_layer}'
 
 
-class SimpleEarlyExit(Predictor):
+class EarlyTokenExit(Predictor):
     """Evaluates early exit predictions from cached SimpleForward results."""
 
     def __init__(self, cache_path: str, k: int = 30, n: int = 20, x: int = 5) -> None:
@@ -236,7 +243,7 @@ class SimpleEarlyExit(Predictor):
 
     @property
     def name(self) -> str:
-        return f'SimpleEarlyExit_k{self.k}_n{self.n}_x{self.x}'
+        return f'EarlyTokenExit_k{self.k}_n{self.n}_x{self.x}'
 
     def predict(self, example: Dict[str, Any]) -> PredictionResult:
         raise NotImplementedError
@@ -336,7 +343,12 @@ if __name__ == "__main__":
     x_values = [1, 5, 10, 15, 20]
     for x in x_values:
         cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
-        predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+        predictor = EarlyTokenExit(cache_path=cache_path, x=x)
+        results = load_cached(evaluator, results_dir, predictor)
+
+    l_values = range(12, 16)
+    for l in l_values:
+        predictor = EarlyLayerExit(hf_model=model, device=device, l=l)
         results = load_cached(evaluator, results_dir, predictor)
 
     print(evaluator.summary())
@@ -362,12 +374,12 @@ if __name__ == "__main__":
     x_values = [1, 5, 10, 15, 20]
     for x in x_values:
         cache_path = os.path.join(results_dir, 'SimpleForward_k30_n20.json')
-        predictor = SimpleEarlyExit(cache_path=cache_path, x=x)
+        predictor = EarlyTokenExit(cache_path=cache_path, x=x)
         results = load_cached(evaluator, results_dir, predictor)
 
     predictor = CrossModelPredictor(
-        source_cache_path='results/wikipedia/1b_100b_perturbed',
-        target_cache_path='results/wikipedia/8b_100b_perturbed'
+        source_cache_path='results/wikipedia_passages/1b_100b_perturbed/SimpleForward_k30_n20.json',
+        target_cache_path='results/wikipedia_passages/8b_100b_perturbed/SimpleForward_k30_n20.json'
     )
 
     print(evaluator.summary())

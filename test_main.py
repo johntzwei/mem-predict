@@ -7,7 +7,7 @@ from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
-from main import SimpleForward, SimpleEarlyExit, CrossModelPredictor, PredictionResult, Evaluator, process_data
+from main import SimpleForward, EarlyTokenExit, CrossModelPredictor, PredictionResult, Evaluator, process_data
 
 MODEL_STR = "allegrolab/hubble-1b-100b_toks-perturbed-hf"
 DEVICE = "cuda"
@@ -97,7 +97,7 @@ def test_simple_early_exit_equals_simple_forward_at_x_equals_n(model: PreTrained
         temp_path = f.name
 
     # Run SimpleEarlyExit with x=n
-    see = SimpleEarlyExit(cache_path=temp_path, k=k, n=n, x=n)
+    see = EarlyTokenExit(cache_path=temp_path, k=k, n=n, x=n)
     see_result = see._predict(0)
 
     os.unlink(temp_path)
@@ -153,8 +153,9 @@ def test_cross_model_equals_early_exit_same_cache(model: PreTrainedModel, tokeni
         cache_path = f.name
 
     # Compare both predictors
-    see = SimpleEarlyExit(cache_path=cache_path, k=k, n=n, x=x)
-    cmp = CrossModelPredictor(source_cache_path=cache_path, target_cache_path=cache_path, k=k, n=n, x=x)
+    see = EarlyTokenExit(cache_path=cache_path, k=k, n=n, x=x)
+    cmp = CrossModelPredictor(
+        source_cache_path=cache_path, target_cache_path=cache_path, k=k, n=n, x=x)
 
     for i in range(3):
         see_result = see._predict(i)
