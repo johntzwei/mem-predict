@@ -1,0 +1,28 @@
+{
+  "name": "1b_100b_perturbed",
+  "model": "allegrolab/hubble-1b-100b_toks-perturbed-hf",
+  "dataset": "allegrolab/chats_personachat",
+  "device": "cuda",
+  "split": "train",
+  "output_dir": "results/chats_personachat",
+  "plot_pareto": true,
+  "predictors": [
+    {
+      "type": "SimpleForward",
+      "k": 30,
+      "n": 20
+    },
+    {
+      "type": "EarlyTokenExit",
+      "k": 30,
+      "n": 20,
+      "x": [1, 5, 10, 15, 20]
+    },
+    {
+      "type": "EarlyLayerExit",
+      "k": 30,
+      "n": 20,
+      "l": [12, 13, 14, 15]
+    }
+  ]
+}

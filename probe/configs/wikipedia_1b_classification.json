@@ -2,7 +2,7 @@
   "name": "wikipedia_1b_classification_head",
   "model": "allegrolab/hubble-1b-100b_toks-perturbed-hf",
   "dataset": "allegrolab/passages_wikipedia",
-  "labels_path": "/project2/robinjia_875/jtwei/relative_memorization/mem-predict/predict/results/wikipedia_passages/1b_100b_perturbed/SimpleForward_k30_n20.json",
+  "labels_path": "/home1/lijc/mem-predict/results/wikipedia_passages/1b_100b_perturbed/SimpleForward_k30_n20.json",
   "device": "cuda",
   "split": "train",
   "n_splits": 3,
