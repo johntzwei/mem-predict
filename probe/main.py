@@ -16,6 +16,7 @@ from datasets.dataset_dict import DatasetDict
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 from sklearn.model_selection import KFold
 from torch import nn
+from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
@@ -70,7 +71,7 @@ class Probe(ABC):
     def __init__(self, model: PreTrainedModel, device: str = "cuda") -> None:
         self.model = model
         self.device = device
-        self.model.to(device)
+        # self.model.to(device)
 
     @abstractmethod
     def fit(self, train_ds: Dataset, labels: np.ndarray) -> None:
@@ -126,7 +127,7 @@ class ClassificationHeadProbe(Probe):
         training_args = TrainingArguments(
             output_dir="./probe_output",
             num_train_epochs=self.epochs,
-            per_device_train_batch_size=8,
+            per_device_train_batch_size=self.batch_size,
             learning_rate=self.lr,
             logging_steps=50,
             save_strategy="no",
@@ -144,16 +145,11 @@ class ClassificationHeadProbe(Probe):
         self.model.eval()
         probas = []
 
-        n = len(ds)
         with torch.no_grad():
-            for i in range(n):
-                input_ids = (
-                    ds[i]["input_ids"][: self.k +
-                                       self.n].unsqueeze(0).to(self.device)
-                )
-                outputs = self.model(input_ids)
-                prob = torch.softmax(
-                    outputs.logits, dim=-1)[0, 1].cpu().numpy()
+            for i in tqdm(range(len(ds)), desc="Predicting"):
+                input_ids = ds[i]["input_ids"][: self.k + self.n].unsqueeze(0)
+                outputs = self.model(input_ids.to(self.model.device))
+                prob = torch.softmax(outputs.logits, dim=-1)[0, 1].cpu().numpy()
                 probas.append(prob)
 
         return np.array(probas)
@@ -197,7 +193,7 @@ class IntermediateLayerProbe(Probe):
 
         # create the probe manually
         hidden_dim = model.config.hidden_size
-        self.classifier_probe = LinearProbe(hidden_dim, num_labels=2)   # we just assume its binary for now
+        self.classifier_probe = LinearProbe(hidden_dim, num_labels=2).to(device)
 
         # Freeze base model
         for param in self.model.parameters():
@@ -214,9 +210,9 @@ class IntermediateLayerProbe(Probe):
         self.model.eval()
         all_hidden = []
 
-        # get the hidden states from original model 
-        for i in range(len(train_ds)):
-            input_ids = train_ds[i]["input_ids"][: self.k + self.n].unsqueeze(0).to(self.device)
+        # get the hidden states from original model
+        for i in tqdm(range(len(train_ds)), desc="Extracting hidden states"):
+            input_ids = train_ds[i]["input_ids"][: self.k + self.n].unsqueeze(0).to(self.model.device)
             hidden = self._extract_hidden_states(input_ids)
             all_hidden.append(hidden[:, -1, :].cpu())   # get the last token and move onto the cpu
 
@@ -251,25 +247,24 @@ class IntermediateLayerProbe(Probe):
 
     def predict_proba(self, ds: Dataset) -> np.ndarray:
         self.model.eval()
+        self.classifier_probe.eval()
         probas = []
 
-        n = len(ds)
         with torch.no_grad():
-            for i in range(n):
-                input_ids = (
-                    ds[i]["input_ids"][: self.k +
-                                       self.n].unsqueeze(0).to(self.device)
-                )
-                outputs = self.model(input_ids)
-                prob = torch.softmax(
-                    outputs.logits, dim=-1)[0, 1].cpu().numpy()
+            for i in tqdm(range(len(ds)), desc="Predicting"):
+                input_ids = ds[i]["input_ids"][: self.k + self.n].unsqueeze(0).to(self.model.device)
+                hidden = self._extract_hidden_states(input_ids)
+                # hidden is (1, seq_len, hidden_dim), take last token
+                hidden_last = hidden[:, -1, :].unsqueeze(1)  # (1, 1, hidden_dim)
+                logits = self.classifier_probe(hidden_last)  # (1, 2)
+                prob = torch.softmax(logits, dim=-1)[0, 1].cpu().numpy()
                 probas.append(prob)
 
         return np.array(probas)
 
     @property
     def name(self) -> str:
-        return f"IntermediateLayerProbe_k{self.k}"
+        return f"IntermediateLayerProbe_k{self.k}_l{self.l}"
 
 def evaluate(y_true: np.ndarray, y_proba: np.ndarray, name: str) -> Dict[str, float]:
     """Compute and print AUROC, AP, and F1 for a set of predictions."""
@@ -292,6 +287,16 @@ def create_probe(
             k=probe_config.k,
             n=probe_config.n,
             lr=probe_config.lr,
+            epochs=probe_config.epochs,
+        )
+    elif probe_config.type == "IntermediateLayerProbe":
+        return IntermediateLayerProbe(
+            model,
+            device=config.device,
+            k=probe_config.k,
+            n=probe_config.n,
+            lr=probe_config.lr,
+            l=probe_config.l,
             epochs=probe_config.epochs,
         )
     else:
@@ -326,9 +331,19 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     for fold, (train_idx, test_idx) in enumerate(kfold.split(y_all)):
         print(f"\n=== Fold {fold + 1}/{config.n_splits} ===")
 
-        model = AutoModelForSequenceClassification.from_pretrained(
-            config.model, num_labels=2
-        )
+        if config.probe.type == "IntermediateLayerProbe":
+            model = AutoModelForCausalLM.from_pretrained(
+                config.model,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+            )
+        else:
+            model = AutoModelForSequenceClassification.from_pretrained(
+                config.model,
+                num_labels=2,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+            )
         model.config.pad_token_id = tokenizer.pad_token_id
 
         train_ds = tokenized_ds.select(train_idx.tolist())
@@ -362,6 +377,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                 "type": config.probe.type,
                 "k": config.probe.k,
                 "n": config.probe.n,
+                "l": config.probe.l,
                 "lr": config.probe.lr,
                 "epochs": config.probe.epochs,
             },
