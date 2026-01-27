@@ -199,9 +199,9 @@ class PretrainedModelWithLinearProbe(nn.Module):
         for param in self.model.parameters():
             param.requires_grad = False
 
-    def _extract_hidden_states(self, input_ids):
+    def _extract_hidden_states(self, input_ids, attention_mask=None):
         with torch.no_grad():
-            output = self.model(input_ids, output_hidden_states=True)
+            output = self.model(input_ids, output_hidden_states=True, attention_mask=attention_mask)
         return output.hidden_states[self.l + 1]
 
     def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
@@ -246,7 +246,7 @@ class IntermediateLayerProbe(Probe):
 
         assert self.l < len(model.model.layers), "Must be a valid layer in the pretrained model"
 
-    def fit(self, train_ds: Dataset, labels: np.ndarray) -> None:
+    def fit(self, train_ds: Dataset, val_ds: Dataset, labels: np.ndarray) -> None:
         print(f"Training linear probe on layer {self.l} hidden states...")
 
         # Prepare dataset with labels and truncated input_ids
