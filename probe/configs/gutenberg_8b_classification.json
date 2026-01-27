@@ -1,0 +1,21 @@
+{
+  "name": "gutenberg_8b_classification_head",
+  "model": "allegrolab/hubble-8b-100b_toks-perturbed-hf",
+  "dataset": "allegrolab/passages_gutenberg_popular",
+  "labels_path": "/home1/lijc/mem-predict/results/passages_gutenberg_popular/8b_100b_perturbed/SimpleForward_k30_n20.json",
+  "device": "cuda",
+  "split": "train",
+  "n_splits": 3,
+  "random_state": 42,
+  "output_dir": "results/probe",
+  "ckpt_dir": "ckpts/probe",
+  "probe": {
+    "type": "ClassificationHeadProbe",
+    "k": 30,
+    "n": 20,
+    "l": 15,
+    "lr": 0.001,
+    "epochs": 2,
+    "batch_size": 8
+  }
+}

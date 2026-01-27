@@ -1,0 +1,30 @@
+{
+  "name": "8b_100b_perturbed",
+  "model": "allegrolab/hubble-8b-100b_toks-perturbed-hf",
+  "dataset": "allegrolab/passages_gutenberg_popular",
+  "device": "cuda",
+  "split": "train",
+  "output_dir": "results/passages_gutenberg_popular",
+  "plot_pareto": true,
+  "predictors": [
+    {
+      "type": "SimpleForward",
+      "k": 30,
+      "n": 20
+    },
+    {
+      "type": "EarlyTokenExit",
+      "k": 30,
+      "n": 20,
+      "x": [1, 5, 10, 15, 20]
+    },
+    {
+      "type": "CrossModelPredictor",
+      "k": 30,
+      "n": 20,
+      "x": [20],
+      "source_cache_path": "results/gutenberg_1b_100b_perturbed/SimpleForward_k30_n20.json",
+      "target_cache_path": "results/gutenberg_8b_100b_perturbed/SimpleForward_k30_n20.json"
+    }
+  ]
+}
