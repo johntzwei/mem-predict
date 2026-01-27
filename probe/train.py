@@ -182,8 +182,46 @@ class LinearProbe(nn.Module):
         # only use the last tokens hidden state for classification
         return self.classifier(hidden_states[:, -1, :])
 
+class PretrainedModelWithLinearProbe(nn.Module):
+    """Wrapper that combines a frozen pretrained model with a trainable linear probe."""
+
+    def __init__(self, model: PreTrainedModel, l: int, num_classes: int = 2):
+        super().__init__()
+        self.model = model
+        self.num_classes = num_classes
+        self.l = l
+
+        hidden_dim = model.config.hidden_size
+        self.classifier = LinearProbe(hidden_dim, num_classes)
+        self.loss_fn = nn.CrossEntropyLoss()
+
+        # Freeze the base model
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def _extract_hidden_states(self, input_ids):
+        with torch.no_grad():
+            output = self.model(input_ids, output_hidden_states=True)
+        return output.hidden_states[self.l + 1]
+
+    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
+        hidden_states = self._extract_hidden_states(input_ids)
+        logits = self.classifier(hidden_states)
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_fn(logits, labels)
+
+        return {"loss": loss, "logits": logits}
+
+    @property
+    def device(self):
+        return next(self.model.parameters()).device
+
 
 class IntermediateLayerProbe(Probe):
+    """Probe that trains a linear classifier on intermediate layer hidden states."""
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -195,7 +233,9 @@ class IntermediateLayerProbe(Probe):
         epochs: int = 4,
         batch_size: int = 8,
     ) -> None:
-        Probe.__init__(self, model, device)
+        # Wrap the model with our linear probe
+        self.probe_model = PretrainedModelWithLinearProbe(model, l=l, num_classes=2)
+        Probe.__init__(self, self.probe_model, device)
 
         self.k = k
         self.n = n
@@ -206,73 +246,45 @@ class IntermediateLayerProbe(Probe):
 
         assert self.l < len(model.model.layers), "Must be a valid layer in the pretrained model"
 
-        # create the probe manually
-        hidden_dim = model.config.hidden_size
-        self.classifier_probe = LinearProbe(hidden_dim, num_labels=2).to(device)
-
-        # Freeze base model
-        for param in self.model.parameters():
-            param.requires_grad = False
-
-    def _extract_hidden_states(self, input_ids):
-        with torch.no_grad():
-            output = self.model(input_ids, output_hidden_states=True)
-
-        return output.hidden_states[self.l + 1]
-
     def fit(self, train_ds: Dataset, labels: np.ndarray) -> None:
-        print(f"Extacting hidden states from layer {self.l}...")
-        self.model.eval()
-        all_hidden = []
+        print(f"Training linear probe on layer {self.l} hidden states...")
 
-        # get the hidden states from original model
-        for i in tqdm(range(len(train_ds)), desc="Extracting hidden states"):
-            input_ids = train_ds[i]["input_ids"][: self.k + self.n].unsqueeze(0).to(self.model.device)
-            hidden = self._extract_hidden_states(input_ids)
-            all_hidden.append(hidden[:, -1, :].cpu())   # get the last token and move onto the cpu
+        # Prepare dataset with labels and truncated input_ids
+        def preprocess(example: dict, idx: int) -> dict:
+            return {
+                "input_ids": example["input_ids"][: self.k + self.n],
+                "labels": int(labels[idx]),
+            }
 
-        X = torch.cat(all_hidden, dim=0)
-        y = torch.tensor(labels, dtype=torch.long)
+        train_ds = train_ds.map(preprocess, with_indices=True)
+        train_ds.set_format("torch", columns=["input_ids", "labels"])
 
-        # Train the linear probe
-        print(f"Training the linear probe (hidden_size={X.shape[-1]})")
+        training_args = TrainingArguments(
+            output_dir="./probe_output",
+            num_train_epochs=self.epochs,
+            per_device_train_batch_size=self.batch_size,
+            learning_rate=self.lr,
+            logging_steps=50,
+            save_strategy="no",
+            report_to="none",
+        )
 
-        self.classifier_probe.train()
-        optimizer = torch.optim.Adam(self.classifier_probe.parameters(), lr=self.lr)
-        criterion = nn.CrossEntropyLoss()
-
-        dataset = torch.utils.data.TensorDataset(X, y)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True) 
-
-        for epoch in range(self.epochs):
-            total_loss = 0.0
-            for batch_X, batch_y in loader:
-                batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
-
-                optimizer.zero_grad()
-
-                output = self.classifier_probe(batch_X.unsqueeze(1))   # batch, seq_len, hidden_dim
-                loss = criterion(output, batch_y)
-
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-
-            print(f"Epoch {epoch + 1}/{self.epochs}, Loss: {total_loss / len(loader):.4f}")
+        trainer = Trainer(
+            model=self.probe_model,
+            args=training_args,
+            train_dataset=train_ds,
+        )
+        trainer.train()
 
     def predict_proba(self, ds: Dataset) -> np.ndarray:
-        self.model.eval()
-        self.classifier_probe.eval()
+        self.probe_model.eval()
         probas = []
 
         with torch.no_grad():
             for i in tqdm(range(len(ds)), desc="Predicting"):
-                input_ids = ds[i]["input_ids"][: self.k + self.n].unsqueeze(0).to(self.model.device)
-                hidden = self._extract_hidden_states(input_ids)
-                # hidden is (1, seq_len, hidden_dim), take last token
-                hidden_last = hidden[:, -1, :].unsqueeze(1)  # (1, 1, hidden_dim)
-                logits = self.classifier_probe(hidden_last)  # (1, 2)
-                prob = torch.softmax(logits, dim=-1)[0, 1].cpu().numpy()
+                input_ids = ds[i]["input_ids"][: self.k + self.n].unsqueeze(0).to(self.probe_model.device)
+                outputs = self.probe_model(input_ids)
+                prob = torch.softmax(outputs["logits"], dim=-1)[0, 1].cpu().numpy()
                 probas.append(prob)
 
         return np.array(probas)
@@ -282,14 +294,14 @@ class IntermediateLayerProbe(Probe):
         return f"IntermediateLayerProbe_k{self.k}_l{self.l}"
 
     def save_weights(self, path: str) -> None:
-        """Save the linear probe weights."""
-        torch.save(self.classifier_probe.state_dict(), path)
+        """Save the linear probe classifier weights."""
+        torch.save(self.probe_model.classifier.state_dict(), path)
         print(f"Saved IntermediateLayerProbe weights to {path}")
 
     def load_weights(self, path: str) -> None:
-        """Load the linear probe weights."""
+        """Load the linear probe classifier weights."""
         state_dict = torch.load(path, map_location=self.device)
-        self.classifier_probe.load_state_dict(state_dict)
+        self.probe_model.classifier.load_state_dict(state_dict)
         print(f"Loaded IntermediateLayerProbe weights from {path}")
 
 
@@ -332,8 +344,8 @@ def create_probe(
 
 def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     """Run a probe experiment with the given config."""
-    sys.path.insert(0, str(Path(__file__).parent.parent / "predict"))
-    from train import process_data
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from predict.train import process_data
 
     print(f"Running experiment: {config.name}")
     print(f"Model: {config.model}")
@@ -399,7 +411,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             best_fold = fold
             # Save the probe state for the best fold
             if config.probe.type == "IntermediateLayerProbe":
-                best_probe_state = probe.classifier_probe.state_dict()
+                best_probe_state = probe.probe_model.classifier.state_dict()
             else:
                 best_probe_state = {k: v.cpu().clone() for k, v in model.state_dict().items() if "score" in k}
 

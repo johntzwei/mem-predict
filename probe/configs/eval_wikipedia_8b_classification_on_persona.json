@@ -1,0 +1,12 @@
+{
+  "name": "eval_wikipedia_8b_classification_on_persona",
+  "model": "allegrolab/hubble-8b-100b_toks-perturbed-hf",
+  "dataset": "allegrolab/chats_personachat",
+  "labels_path": "results/chats_personachat/8b_100b_perturbed/SimpleForward_k30_n20.json",
+  "ckpt_path": "ckpts/probe/wikipedia_8b_classification_head.pt",
+  "probe": {
+    "type": "ClassificationHeadProbe",
+    "k": 30,
+    "n": 20
+  }
+}

@@ -9,7 +9,7 @@ Predicting LLM memorization using model internals.
 The `predict` module evaluates different methods for predicting k-extractability of sequences.
 
 ```bash
-python predict/main.py --config predict/configs/gutenberg_1b.json
+python predict/train.py --config predict/configs/gutenberg_1b.json
 ```
 
 #### Predict Config
@@ -42,7 +42,7 @@ python predict/main.py --config predict/configs/gutenberg_1b.json
 The `probe` module trains linear probes on model hidden states to predict extractability.
 
 ```bash
-python probe/main.py --config probe/configs/wikipedia_1b_classification.json
+python probe/train.py --config probe/configs/wikipedia_1b_classification.json
 ```
 
 #### Probe Config
