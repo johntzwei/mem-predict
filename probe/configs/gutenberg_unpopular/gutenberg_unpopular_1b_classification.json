@@ -7,8 +7,8 @@
   "split": "train",
   "n_splits": 3,
   "random_state": 42,
-  "output_dir": "results/probe",
-  "ckpt_dir": "ckpts/probe",
+  "output_dir": "results/probe/gutenberg_unpopular",
+  "ckpt_dir": "ckpts/probe/gutenberg_unpopular",
   "probe": {
     "type": "ClassificationHeadProbe",
     "k": 30,

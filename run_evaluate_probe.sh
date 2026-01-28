@@ -22,4 +22,4 @@ source /home1/lijc/mem-predict/.venv/bin/activate
 cd /home1/lijc/mem-predict
 
 # Run your script
-python probe/train.py --config probe/configs/wikipedia_8b_intermediate_classification_pool.json 
+python probe/evaluate.py --config probe/configs/eval/eval_wikipedia_8b_intermediate_classification_on_gutenberg.json

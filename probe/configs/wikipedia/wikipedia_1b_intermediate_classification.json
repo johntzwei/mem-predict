@@ -1,5 +1,5 @@
 {
-  "name": "wikipedia_1b_classification_head",
+  "name": "wikipedia_1b_intermediate_classification_head_l12",
   "model": "allegrolab/hubble-1b-100b_toks-perturbed-hf",
   "dataset": "allegrolab/passages_wikipedia",
   "labels_path": "/home1/lijc/mem-predict/results/passages_wikipedia/1b_100b_perturbed/SimpleForward_k30_n20.json",
@@ -7,15 +7,17 @@
   "split": "train",
   "n_splits": 3,
   "random_state": 42,
-  "output_dir": "results/probe",
-  "ckpt_dir": "ckpts/probe",
+  "output_dir": "results/probe/wikipedia",
+  "ckpt_dir": "ckpts/probe/wikipedia",
   "probe": {
-    "type": "ClassificationHeadProbe",
+    "type": "IntermediateLayerProbe",
     "k": 30,
     "n": 20,
-    "l": 15,
+    "l": 12,
     "lr": 0.001,
     "epochs": 2,
-    "batch_size": 8
+    "batch_size": 8,
+    "pooling": false,
+    "attn_weighting": false
   }
 }
