@@ -3,10 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -15,15 +14,17 @@ from datasets.arrow_dataset import Dataset
 from datasets.dataset_dict import DatasetDict
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 from sklearn.model_selection import KFold
-from torch import nn
-from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
     AutoTokenizer,
     PreTrainedModel,
-    Trainer,
-    TrainingArguments,
+)
+
+from probe import (
+    ClassificationHeadProbe,
+    IntermediateLayerProbe,
+    Probe,
 )
 
 
@@ -37,6 +38,8 @@ class ProbeConfig:
     lr: float = 1e-3
     epochs: int = 4
     batch_size: int = 8
+    pooling: bool = False
+    attn_weighting: bool = False
 
 
 @dataclass
@@ -66,245 +69,6 @@ class ExperimentConfig:
             return cls.from_dict(json.load(f))
 
 
-class Probe(ABC):
-    """Base class for memorization probes."""
-
-    def __init__(self, model: PreTrainedModel, device: str = "cuda") -> None:
-        self.model = model
-        self.device = device
-        # self.model.to(device)
-
-    @abstractmethod
-    def fit(self, train_ds: Dataset, labels: np.ndarray) -> None:
-        pass
-
-    @abstractmethod
-    def predict_proba(self, ds: Dataset) -> np.ndarray:
-        pass
-
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        pass
-
-
-class ClassificationHeadProbe(Probe):
-    """Sequence classification probe using AutoModelForSequenceClassification."""
-
-    def __init__(
-        self,
-        model: PreTrainedModel,
-        device: str = "cuda",
-        k: int = 30,
-        n: int = 20,
-        lr: float = 1e-3,
-        epochs: int = 4,
-        batch_size: int = 8,
-    ) -> None:
-        Probe.__init__(self, model, device)
-
-        self.k = k
-        self.n = n
-        self.lr = lr
-        self.epochs = epochs
-        self.batch_size = batch_size
-
-        # Freeze base model, train only the classifier head
-        for name, param in self.model.named_parameters():
-            if "score" not in name:  # score is the classification head
-                param.requires_grad = False
-
-    def fit(self, train_ds: Dataset, labels: np.ndarray) -> None:
-        # Prepare dataset with labels and truncated input_ids
-        def preprocess(example: dict, idx: int) -> dict:
-            return {
-                "input_ids": example["input_ids"][: self.k + self.n],
-                "labels": int(labels[idx]),
-            }
-
-        train_ds = train_ds.map(preprocess, with_indices=True)
-        train_ds.set_format("torch", columns=["input_ids", "labels"])
-
-        training_args = TrainingArguments(
-            output_dir="./probe_output",
-            num_train_epochs=self.epochs,
-            per_device_train_batch_size=self.batch_size,
-            learning_rate=self.lr,
-            logging_steps=50,
-            save_strategy="no",
-            report_to="none",
-        )
-
-        trainer = Trainer(
-            model=self.model,
-            args=training_args,
-            train_dataset=train_ds,
-        )
-        trainer.train()
-
-    def predict_proba(self, ds: Dataset) -> np.ndarray:
-        self.model.eval()
-        probas = []
-
-        with torch.no_grad():
-            for i in tqdm(range(len(ds)), desc="Predicting"):
-                input_ids = ds[i]["input_ids"][: self.k + self.n].unsqueeze(0)
-                outputs = self.model(input_ids.to(self.model.device))
-                prob = torch.softmax(outputs.logits, dim=-1)[0, 1].cpu().numpy()
-                probas.append(prob)
-
-        return np.array(probas)
-
-    @property
-    def name(self) -> str:
-        return f"ClassificationHeadProbe_k{self.k}"
-
-    def save_weights(self, path: str) -> None:
-        """Save the classification head weights."""
-        # Extract only the score (classification head) parameters
-        score_state = {k: v for k, v in self.model.state_dict().items() if "score" in k}
-        torch.save(score_state, path)
-        print(f"Saved ClassificationHeadProbe weights to {path}")
-
-    def load_weights(self, path: str) -> None:
-        """Load the classification head weights."""
-        score_state = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(score_state, strict=False)
-        print(f"Loaded ClassificationHeadProbe weights from {path}")
-
-
-class LinearProbe(nn.Module):
-    def __init__(self, input_dim: int, num_labels: int):
-        super().__init__()
-        self.classifier = nn.Linear(input_dim, num_labels)
-    
-    def forward(self, hidden_states: torch.Tensor):
-        # only use the last tokens hidden state for classification
-        return self.classifier(hidden_states[:, -1, :])
-
-class PretrainedModelWithLinearProbe(nn.Module):
-    """Wrapper that combines a frozen pretrained model with a trainable linear probe."""
-
-    def __init__(self, model: PreTrainedModel, l: int, num_classes: int = 2):
-        super().__init__()
-        self.model = model
-        self.num_classes = num_classes
-        self.l = l
-
-        hidden_dim = model.config.hidden_size
-        self.classifier = LinearProbe(hidden_dim, num_classes)
-        self.loss_fn = nn.CrossEntropyLoss()
-
-        # Freeze the base model
-        for param in self.model.parameters():
-            param.requires_grad = False
-
-    def _extract_hidden_states(self, input_ids, attention_mask=None):
-        with torch.no_grad():
-            output = self.model(input_ids, output_hidden_states=True, attention_mask=attention_mask)
-        return output.hidden_states[self.l + 1]
-
-    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        hidden_states = self._extract_hidden_states(input_ids)
-        logits = self.classifier(hidden_states)
-
-        loss = None
-        if labels is not None:
-            loss = self.loss_fn(logits, labels)
-
-        return {"loss": loss, "logits": logits}
-
-    @property
-    def device(self):
-        return next(self.model.parameters()).device
-
-
-class IntermediateLayerProbe(Probe):
-    """Probe that trains a linear classifier on intermediate layer hidden states."""
-
-    def __init__(
-        self,
-        model: PreTrainedModel,
-        device: str = "cuda",
-        k: int = 30,
-        n: int = 20,
-        l: int = 15,
-        lr: float = 1e-3,
-        epochs: int = 4,
-        batch_size: int = 8,
-    ) -> None:
-        # Wrap the model with our linear probe
-        self.probe_model = PretrainedModelWithLinearProbe(model, l=l, num_classes=2)
-        Probe.__init__(self, self.probe_model, device)
-
-        self.k = k
-        self.n = n
-        self.l = l
-        self.lr = lr
-        self.epochs = epochs
-        self.batch_size = batch_size
-
-        assert self.l < len(model.model.layers), "Must be a valid layer in the pretrained model"
-
-    def fit(self, train_ds: Dataset, val_ds: Dataset, labels: np.ndarray) -> None:
-        print(f"Training linear probe on layer {self.l} hidden states...")
-
-        # Prepare dataset with labels and truncated input_ids
-        def preprocess(example: dict, idx: int) -> dict:
-            return {
-                "input_ids": example["input_ids"][: self.k + self.n],
-                "labels": int(labels[idx]),
-            }
-
-        train_ds = train_ds.map(preprocess, with_indices=True)
-        train_ds.set_format("torch", columns=["input_ids", "labels"])
-
-        training_args = TrainingArguments(
-            output_dir="./probe_output",
-            num_train_epochs=self.epochs,
-            per_device_train_batch_size=self.batch_size,
-            learning_rate=self.lr,
-            logging_steps=50,
-            save_strategy="no",
-            report_to="none",
-        )
-
-        trainer = Trainer(
-            model=self.probe_model,
-            args=training_args,
-            train_dataset=train_ds,
-        )
-        trainer.train()
-
-    def predict_proba(self, ds: Dataset) -> np.ndarray:
-        self.probe_model.eval()
-        probas = []
-
-        with torch.no_grad():
-            for i in tqdm(range(len(ds)), desc="Predicting"):
-                input_ids = ds[i]["input_ids"][: self.k + self.n].unsqueeze(0).to(self.probe_model.device)
-                outputs = self.probe_model(input_ids)
-                prob = torch.softmax(outputs["logits"], dim=-1)[0, 1].cpu().numpy()
-                probas.append(prob)
-
-        return np.array(probas)
-
-    @property
-    def name(self) -> str:
-        return f"IntermediateLayerProbe_k{self.k}_l{self.l}"
-
-    def save_weights(self, path: str) -> None:
-        """Save the linear probe classifier weights."""
-        torch.save(self.probe_model.classifier.state_dict(), path)
-        print(f"Saved IntermediateLayerProbe weights to {path}")
-
-    def load_weights(self, path: str) -> None:
-        """Load the linear probe classifier weights."""
-        state_dict = torch.load(path, map_location=self.device)
-        self.probe_model.classifier.load_state_dict(state_dict)
-        print(f"Loaded IntermediateLayerProbe weights from {path}")
-
-
 def evaluate(y_true: np.ndarray, y_proba: np.ndarray, name: str) -> Dict[str, float]:
     """Compute and print AUROC, AP, and F1 for a set of predictions."""
     auroc = roc_auc_score(y_true, y_proba)
@@ -327,6 +91,7 @@ def create_probe(
             n=probe_config.n,
             lr=probe_config.lr,
             epochs=probe_config.epochs,
+            batch_size=probe_config.batch_size,
         )
     elif probe_config.type == "IntermediateLayerProbe":
         return IntermediateLayerProbe(
@@ -337,6 +102,9 @@ def create_probe(
             lr=probe_config.lr,
             l=probe_config.l,
             epochs=probe_config.epochs,
+            batch_size=probe_config.batch_size,
+            pooling=probe_config.pooling,
+            attn_weighting=probe_config.attn_weighting,
         )
     else:
         raise ValueError(f"Unknown probe type: {probe_config.type}")
@@ -380,6 +148,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                 config.model,
                 device_map="auto",
                 low_cpu_mem_usage=True,
+                attn_implementation="eager" if config.probe.attn_weighting else None,
             )
         else:
             model = AutoModelForSequenceClassification.from_pretrained(
@@ -409,11 +178,15 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         if metrics["auroc"] > best_auroc:
             best_auroc = metrics["auroc"]
             best_fold = fold
-            # Save the probe state for the best fold
+            # Save the probe state for the best fold (clone to CPU for portability)
             if config.probe.type == "IntermediateLayerProbe":
-                best_probe_state = probe.probe_model.classifier.state_dict()
+                best_probe_state = {k: v.cpu().clone() for k, v in probe.probe_model.classifier.state_dict().items()}
             else:
                 best_probe_state = {k: v.cpu().clone() for k, v in model.state_dict().items() if "score" in k}
+
+        # Clean up to free GPU memory before next fold
+        del probe, model
+        torch.cuda.empty_cache()
 
     # Overall metrics
     print("\n=== Overall ===")
@@ -434,6 +207,9 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             "l": config.probe.l,
             "lr": config.probe.lr,
             "epochs": config.probe.epochs,
+            "batch_size": config.probe.batch_size,
+            "pooling": config.probe.pooling,
+            "attn_weighting": config.probe.attn_weighting,
         },
     }, ckpt_path)
     print(f"Best probe checkpoint saved to {ckpt_path}")
@@ -453,6 +229,9 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                 "l": config.probe.l,
                 "lr": config.probe.lr,
                 "epochs": config.probe.epochs,
+                "batch_size": config.probe.batch_size,
+                "pooling": config.probe.pooling,
+                "attn_weighting": config.probe.attn_weighting,
             },
             "n_splits": config.n_splits,
         },

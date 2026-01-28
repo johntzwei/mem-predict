@@ -19,9 +19,6 @@ from transformers import (
 )
 
 from train import (
-    ClassificationHeadProbe,
-    IntermediateLayerProbe,
-    LinearProbe,
     ProbeConfig,
     create_probe,
 )
@@ -132,6 +129,11 @@ def run_evaluation(config: EvaluationConfig) -> Dict[str, Any]:
                 "k": config.probe.k,
                 "n": config.probe.n,
                 "l": config.probe.l,
+                "lr": config.probe.lr,
+                "epochs": config.probe.epochs,
+                "batch_size": config.probe.batch_size,
+                "pooling": config.probe.pooling,
+                "attn_weighting": config.probe.attn_weighting,
             },
         },
         "metrics": {"auroc": auroc, "ap": ap, "f1": f1},
