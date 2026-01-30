@@ -182,7 +182,7 @@ class PretrainedModelWithLinearProbe(nn.Module):
             attention_diag = attention_diag.unsqueeze(-1) # B, L-1, 1
 
             # apply the attention weights now
-            hidden_states = hidden_states[:, 1:, :] * attention_diag
+            hidden_states = hidden_states[:, :-1, :] * attention_diag
 
             # sum into one feature 
             hidden_states = hidden_states.sum(dim=1, keepdim=True)

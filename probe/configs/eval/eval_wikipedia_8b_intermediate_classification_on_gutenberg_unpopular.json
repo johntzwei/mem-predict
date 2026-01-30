@@ -1,0 +1,13 @@
+{
+  "name": "eval_wikipedia_8b_intermediate_l14_classification_on_gutenberg_unpopular",
+  "model": "allegrolab/hubble-8b-100b_toks-perturbed-hf",
+  "dataset": "allegrolab/passages_gutenberg_unpopular",
+  "labels_path": "results/passages_gutenberg_unpopular/8b_100b_perturbed/SimpleForward_k30_n20.json",
+  "ckpt_path": "ckpts/probe/wikipedia_8b_intermediate_classification_head_l14.pt",
+  "probe": {
+    "type": "IntermediateLayerProbe",
+    "k": 30,
+    "n": 20,
+    "l": 14
+  }
+}

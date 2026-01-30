@@ -91,6 +91,7 @@ def run_evaluation(config: EvaluationConfig) -> Dict[str, Any]:
             config.model,
             device_map="auto",
             low_cpu_mem_usage=True,
+            attn_implementation="eager" if config.probe.attn_weighting else None,
         )
     else:
         model = AutoModelForSequenceClassification.from_pretrained(

@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --time=3-00:00:00
+#SBATCH --time=0-24:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --output=logs/%j_%x.out
 #SBATCH --error=logs/%j_%x.err
@@ -22,4 +22,4 @@ source /home1/lijc/mem-predict/.venv/bin/activate
 cd /home1/lijc/mem-predict
 
 # Run your script
-python predict/train.py --config predict/configs/gutenberg_1b.json
+python predict/train.py --config predict/configs/unpopular_gutenberg_8b.json
